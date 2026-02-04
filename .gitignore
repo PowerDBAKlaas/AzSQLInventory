@@ -1,0 +1,101 @@
+# ===================================
+# AzSQLInventory .gitignore
+# ===================================
+
+# === Secrets & Credentials ===
+*.credentials
+*.secret
+*.key
+*credentials.json
+*secrets.json
+*config.local.json
+.env
+.env.local
+
+# === Local Settings ===
+*settings.local.json
+*appsettings.local.json
+local-config.json
+
+# === Logs ===
+*.log
+logs/
+*.log.*
+log-*.txt
+
+# === Output & Export Files ===
+*.csv
+*.xlsx
+*.xls
+exports/
+output/
+inventory-*.json
+report-*.html
+
+# === Build Artifacts ===
+bin/
+obj/
+*.dll
+*.exe
+*.nupkg
+*.zip
+
+# === Test Results ===
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# === IDE & Editor Files ===
+.vscode/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.idea/
+*.swp
+*.swo
+*~
+
+# === OS Files ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# === PowerShell Specific ===
+*.ps1xml
+PSGetModuleInfo.xml
+
+# === Cache & Temp Files ===
+*.tmp
+*.temp
+tmp/
+temp/
+cache/
+.cache/
+
+# === Backup Files ===
+*.bak
+*.backup
+*.old
+*~
+
+# === Documentation Build ===
+docs/_build/
+site/
+
+# === Package Management ===
+packages/
+.nuget/
+
+# === Sensitive Test Data ===
+*test-data.json
+*sample-server.json
+*server-backup.json
+
+# === Personal Notes ===
+TODO.md
+NOTES.md
+scratch/
