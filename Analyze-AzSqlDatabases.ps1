@@ -213,7 +213,7 @@ function Get-DatabaseCost {
 
     # vCore pricing
     if ($Edition -eq 'GeneralPurpose') {
-        if ($SkuName -match 'Serverless') {
+        if ($SkuName -match 'Serverless' -or $SkuName -match '_S_') {
             return $Capacity * $Pricing['GP_S_Gen5_vCore']
         }
         return $Capacity * $Pricing['GP_Gen5_vCore']
@@ -300,6 +300,7 @@ $results = foreach ($db in $databases) {
         RecommendedCapacity          = 0
         Confidence                   = 'Medium'
         Priority                     = 'Medium'
+        Impact                       = 'Medium'
         NextAction                   = ''
         Flags                        = ''
 
@@ -699,285 +700,438 @@ $results = foreach ($db in $databases) {
 
     # TIER 4: Optimization Paths
 
-    switch ($result.Classification) {
-        'BURSTY' {
-            # Tier 4A: Serverless viability
+    # Special check: Should serverless move to provisioned?
+    $serverlessShouldMoveToProvisioned = $false
+    $serverlessMoveReason = ''
+    $serverlessMoveImpact = 'Medium'
 
-            # If already serverless, optimize min/max vCore
-            if ($isServerless) {
-                $result.Serverless_Viable = $true
-                $result.Status = 'OPTIMIZE'
+    if ($isServerless) {
+        # Cost comparison: serverless always-on vs provisioned
+        $currentServerlessCost = $db.Capacity * $Pricing['GP_S_Gen5_vCore']
+        $provisionedCost = $db.Capacity * $Pricing['GP_Gen5_vCore']
 
-                # Calculate optimal vCore range
-                $optimalMinVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_P95 / 100 * 0.8))
-                $optimalMaxVCore = [Math]::Max($optimalMinVCore, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
+        # Estimate actual serverless cost with auto-pause (50% discount when paused)
+        $estimatedPauseTime = [Math]::Min($result.Idle_Percent / 100, 0.8)  # Max 80% pause
+        $estimatedServerlessCost = $currentServerlessCost * (1 - ($estimatedPauseTime * 0.5))
 
-                # Parse current min/max from SKU name (e.g., GP_S_Gen5_2)
-                # Actual min/max would need to come from database properties
-                $currentVCores = $db.Capacity
+        # Reasons to move to provisioned:
 
-                if ($optimalMaxVCore -lt $currentVCores) {
-                    $result.Recommendation = 'Optimize serverless vCore range'
-                    $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
-                    $result.RecommendedCapacity = $optimalMinVCore
-                    $result.Recommended_Cost_EUR_Monthly = $optimalMinVCore * $Pricing['GP_S_Gen5_vCore']
-                    $result.Priority = 'Medium'
-                    $result.NextAction = 'Adjust serverless min/max vCore settings'
-                } else {
-                    $result.Status = 'OK'
-                    $result.Recommendation = 'OK (serverless settings appropriate)'
-                    $result.Priority = 'Low'
-                }
+        # 1. STEADY workload - never pauses
+        if ($result.Classification -eq 'STEADY') {
+            $serverlessShouldMoveToProvisioned = $true
+            $serverlessMoveReason = 'Steady workload - auto-pause not utilized'
+            $costSavings = $estimatedServerlessCost - $provisionedCost
+
+            if ($costSavings -gt 50) {
+                $serverlessMoveImpact = 'High'
+            } elseif ($costSavings -gt 20) {
+                $serverlessMoveImpact = 'Medium'
             } else {
-                # Not serverless yet - check if viable
-                $serverlessDisqualifiers = @()
-
-                if ($result.Connections_Per_Hour_Avg -gt 12) {
-                    # >1 per 5 min
-                    $serverlessDisqualifiers += 'High connection frequency'
-                }
-
-                if ($result.LogWrite_P95 -gt 40) {
-                    $serverlessDisqualifiers += 'Write-heavy workload'
-                }
-
-                if ($serverlessDisqualifiers.Count -eq 0) {
-                    $result.Serverless_Viable = $true
-                    $result.Status = 'OPTIMIZE'
-
-                    # Calculate vCore size
-                    $minVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_P95 / 100))
-                    $maxVCore = [Math]::Max($minVCore, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
-
-                    $result.Recommendation = 'Migrate to Serverless'
-                    $result.RecommendedTier = "GP_S_Gen5_$minVCore-$maxVCore"
-                    $result.RecommendedCapacity = $minVCore
-                    $result.Recommended_Cost_EUR_Monthly = $minVCore * $Pricing['GP_S_Gen5_vCore']
-                    $result.Priority = 'High'
-                    $result.NextAction = 'Test serverless migration'
-                } else {
-                    $result.Serverless_Viable = $false
-                    $result.Flags = "Serverless blocked: $($serverlessDisqualifiers -join ', ')"
-                    # Fallback to Tier 4C
-                    $result.Classification = 'BURSTY_PROVISIONED'
-                }
+                $serverlessMoveImpact = 'Low'
             }
         }
 
-        'SPARSE' {
-            # Similar to BURSTY for serverless
-            if ($isServerless) {
-                # Already serverless - optimize
-                $optimalMinVCore = 0.5
-                $optimalMaxVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
-
-                $result.Serverless_Viable = $true
-                $result.Status = 'OK'
-                $result.Recommendation = 'OK (serverless appropriate for sparse usage)'
-                $result.Priority = 'Low'
-
-                if ($optimalMaxVCore -lt $db.Capacity) {
-                    $result.Status = 'OPTIMIZE'
-                    $result.Recommendation = 'Reduce serverless max vCore'
-                    $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
-                    $result.RecommendedCapacity = $optimalMinVCore
-                    $result.Recommended_Cost_EUR_Monthly = $optimalMinVCore * $Pricing['GP_S_Gen5_vCore']
-                    $result.Priority = 'Medium'
-                }
-            } elseif ($result.Connections_Per_Hour_Avg -lt 2) {
-                $result.Serverless_Viable = $true
-                $result.Status = 'OPTIMIZE'
-                $result.Recommendation = 'Migrate to Serverless (sparse usage)'
-                $result.RecommendedTier = 'GP_S_Gen5_0.5-1'
-                $result.RecommendedCapacity = 0.5
-                $result.Recommended_Cost_EUR_Monthly = 0.5 * $Pricing['GP_S_Gen5_vCore']
-                $result.Priority = 'High'
+        # 2. High connection frequency prevents auto-pause
+        if ($result.Connections_Per_Hour_Avg -gt 12 -and $result.Idle_Percent -lt 30) {
+            $serverlessShouldMoveToProvisioned = $true
+            $serverlessMoveReason = if ($serverlessMoveReason) {
+                "$serverlessMoveReason + Constant connections prevent auto-pause"
             } else {
-                $result.Status = 'REVIEW'
-                $result.Recommendation = 'FLAG: Decommission review (sparse usage but connections prevent serverless)'
-                $result.Priority = 'Medium'
+                'Constant connections prevent auto-pause'
+            }
+            $costSavings = $currentServerlessCost - $provisionedCost
+
+            if ($costSavings -gt 50) {
+                $serverlessMoveImpact = 'High'
+            } elseif ($costSavings -gt 20) {
+                $serverlessMoveImpact = 'Medium'
+            } else {
+                $serverlessMoveImpact = 'Low'
             }
         }
 
-        'PERIODIC' {
-            # Tier 4B: Elastic pool candidate
-            $result.ElasticPool_Candidate = $true
-            $result.Status = 'OPTIMIZE'
-            $result.Recommendation = 'Elastic pool candidate (predictable pattern)'
-            $result.Flags = 'Requires multi-DB analysis for pool sizing'
-            $result.Priority = 'Medium'
-        }
-
-        'WEEKEND_WEEKDAY' {
-            # Tier 4B: Scheduled scaling or pool
-            $result.ElasticPool_Candidate = $true
-            $result.Status = 'OPTIMIZE'
-            $result.Recommendation = 'Scheduled scaling OR elastic pool'
-            $result.Flags = "Weekly pattern: weekday/weekend variance $([Math]::Round($weeklyVar, 0))%"
-            $result.Priority = 'Medium'
-        }
-
-        'BATCH_HEAVY' {
-            # Tier 4D: Workload split analysis
-            $result.Status = 'OPTIMIZE'
-            $result.Recommendation = 'Consider workload split (OLTP + batch)'
-            $result.Flags = 'Bimodal usage detected'
-            $result.Priority = 'Medium'
-            $result.NextAction = 'Assess if batch can be separated'
-        }
-
-        'CHAOTIC' {
-            # Tier 4F: Conservative provisioning
-            $result.Status = 'OK'
-            $targetCapacity = $computeP95 * 1.5  # 1.5x safety margin
-            $currentCapacity = if ($isDTU) { $DTULimits[$db.SkuName].DTU } else { $db.Capacity * 100 }
-
-            # Hyperscale cannot downgrade
-            if ($isHyperscale) {
-                $result.Recommendation = 'OK (Hyperscale - high variance, query optimization advised)'
-                $result.Flags = 'Chaotic pattern - Hyperscale tier cannot downgrade'
-            } elseif ($targetCapacity -lt $currentCapacity * 0.7) {
-                $result.Recommendation = 'Conservative downgrade possible (high variance workload)'
-                $result.Status = 'OPTIMIZE'
-                $result.Priority = 'Low'
+        # 3. Write-heavy workload (serverless has lower log limits)
+        if ($result.LogWrite_P95 -gt 60) {
+            $serverlessShouldMoveToProvisioned = $true
+            $serverlessMoveReason = if ($serverlessMoveReason) {
+                "$serverlessMoveReason + Write-heavy (serverless log limits)"
             } else {
-                $result.Recommendation = 'OK (high variance, query optimization advised)'
+                'Write-heavy workload (serverless has lower log throughput)'
             }
-
-            if (-not $result.Flags) {
-                $result.Flags = 'Chaotic pattern - unpredictable peaks'
-            }
-            $result.Confidence = 'Low'
+            # Performance impact rather than cost
+            $serverlessMoveImpact = 'High'
         }
 
-        'UNCLASSIFIED' {
-            # Tier 4F: Conservative
-            $result.Status = 'OK'
-            $result.Recommendation = 'OK (workload pattern unclear)'
-            $result.Flags = 'Unclassified pattern'
-            $result.Confidence = 'Low'
-        }
+        # 4. Cost analysis - if auto-pause is ineffective
+        if (-not $serverlessShouldMoveToProvisioned -and $estimatedServerlessCost -gt $provisionedCost * 1.1) {
+            $serverlessShouldMoveToProvisioned = $true
+            $serverlessMoveReason = 'Serverless cost higher than provisioned (low auto-pause effectiveness)'
+            $costSavings = $estimatedServerlessCost - $provisionedCost
 
-        default {
-            # STEADY, BURSTY_PROVISIONED, or fallback
-            # Tier 4C: Steady state optimization
-
-            # Calculate optimal tier (60-75% utilization target)
-            $targetUtilization = 70
-            $optimalCapacity = $computeP95 * 1.2  # 20% headroom
-
-            if ($isDTU) {
-                # Find optimal DTU tier
-                $tiers = @('S0', 'S1', 'S2', 'S3', 'S4', 'S6', 'S7', 'S9', 'S12')
-                $optimalTier = $null
-
-                foreach ($tier in $tiers) {
-                    $tierCapacity = $DTULimits[$tier].DTU
-                    if ($optimalCapacity -le ($tierCapacity * 0.75)) {
-                        $optimalTier = $tier
-                        break
-                    }
-                }
-
-                if (-not $optimalTier) {
-                    # Check Premium
-                    $premiumTiers = @('P1', 'P2', 'P4', 'P6', 'P11', 'P15')
-                    foreach ($tier in $premiumTiers) {
-                        $tierCapacity = $DTULimits[$tier].DTU
-                        if ($optimalCapacity -le ($tierCapacity * 0.75)) {
-                            $optimalTier = $tier
-                            break
-                        }
-                    }
-                }
-
-                if ($optimalTier) {
-                    $currentCapacityValue = $DTULimits[$db.SkuName].DTU
-                    $optimalCapacityValue = $DTULimits[$optimalTier].DTU
-
-                    if ($computeP95 -ge ($currentCapacityValue * 0.6) -and $computeP95 -le ($currentCapacityValue * 0.8)) {
-                        # Current tier is optimal
-                        $result.Status = 'OK'
-                        $result.Recommendation = 'OK (optimal utilization)'
-                        $result.Confidence = 'High'
-                    } elseif ($optimalCapacityValue -lt $currentCapacityValue) {
-                        # Can downgrade
-                        $result.Status = 'OPTIMIZE'
-                        $result.Recommendation = "Downgrade to $optimalTier"
-                        $result.RecommendedTier = $optimalTier
-                        $result.Recommended_Cost_EUR_Monthly = Get-DatabaseCost -Edition 'Standard' -SkuName $optimalTier -Capacity 0
-                        $result.Priority = 'Medium'
-                        $result.Confidence = 'High'
-                    } else {
-                        $result.Status = 'OK'
-                        $result.Recommendation = 'OK (tier appropriate)'
-                    }
-                } else {
-                    # Very high usage, consider vCore
-                    $result.Status = 'OPTIMIZE'
-                    $result.Recommendation = 'Consider migration to vCore (high DTU usage)'
-                    $result.Priority = 'Medium'
-                }
+            if ($costSavings -gt 50) {
+                $serverlessMoveImpact = 'High'
+            } elseif ($costSavings -gt 20) {
+                $serverlessMoveImpact = 'Medium'
             } else {
-                # vCore optimization
-
-                # Hyperscale special handling
-                if ($isHyperscale) {
-                    # Hyperscale cannot easily downgrade, only optimize vCores
-                    $optimalVCores = [Math]::Ceiling($result.CPU_P95 / 100 * 1.2)
-
-                    if ($result.CPU_P95 -ge 60 -and $result.CPU_P95 -le 80) {
-                        $result.Status = 'OK'
-                        $result.Recommendation = 'OK (Hyperscale utilization optimal)'
-                        $result.Flags = 'Hyperscale tier - storage auto-scales'
-                    } elseif ($optimalVCores -lt $db.Capacity) {
-                        $result.Status = 'OPTIMIZE'
-                        $result.Recommendation = "Reduce Hyperscale vCores to $optimalVCores"
-                        $result.RecommendedCapacity = $optimalVCores
-                        $result.Recommended_Cost_EUR_Monthly = $optimalVCores * $Pricing['GP_Gen5_vCore']
-                        $result.Priority = 'Medium'
-                        $result.Flags = 'Hyperscale tier - cannot downgrade to non-Hyperscale'
-                    } else {
-                        $result.Status = 'OK'
-                        $result.Recommendation = 'OK (Hyperscale vCores appropriate)'
-                        $result.Flags = 'Hyperscale tier - storage auto-scales'
-                    }
-                } else {
-                    # Regular vCore optimization
-                    $optimalVCores = [Math]::Ceiling($result.CPU_P95 / 100 * 1.2)
-
-                    if ($result.CPU_P95 -ge 60 -and $result.CPU_P95 -le 80) {
-                        $result.Status = 'OK'
-                        $result.Recommendation = 'OK (optimal utilization)'
-                    } elseif ($optimalVCores -lt $db.Capacity) {
-                        $result.Status = 'OPTIMIZE'
-                        $result.Recommendation = "Reduce vCores to $optimalVCores"
-                        $result.RecommendedCapacity = $optimalVCores
-                        $result.Recommended_Cost_EUR_Monthly = $optimalVCores * $Pricing['GP_Gen5_vCore']
-                        $result.Priority = 'Medium'
-                    } else {
-                        $result.Status = 'OK'
-                        $result.Recommendation = 'OK (vCore appropriate)'
-                    }
-                }
+                $serverlessMoveImpact = 'Low'
             }
         }
     }
 
-    # TIER 5: Cost validation
-    if ($result.Status -eq 'OPTIMIZE' -and $result.Recommended_Cost_EUR_Monthly -gt 0) {
+    # If serverless should move to provisioned, handle it before normal classification logic
+    if ($serverlessShouldMoveToProvisioned) {
+        $result.Status = 'OPTIMIZE'
+        $result.Serverless_Viable = $false
+        $result.Recommendation = 'Migrate from Serverless to provisioned GP'
+        $result.RecommendedTier = "GP_Gen5_$($db.Capacity)"
+        $result.RecommendedCapacity = $db.Capacity
+        $result.Recommended_Cost_EUR_Monthly = $db.Capacity * $Pricing['GP_Gen5_vCore']
         $result.Savings_EUR_Monthly = [Math]::Round($result.Current_Cost_EUR_Monthly - $result.Recommended_Cost_EUR_Monthly, 2)
 
         if ($result.Current_Cost_EUR_Monthly -gt 0) {
             $result.Savings_Percent = [Math]::Round(($result.Savings_EUR_Monthly / $result.Current_Cost_EUR_Monthly * 100), 2)
         }
 
-        # Cost threshold validation
-        if ($result.Savings_EUR_Monthly -lt 50 -and $result.Savings_Percent -lt 30) {
-            $result.Status = 'OK'
-            $result.Recommendation = 'OK (savings too small to justify migration)'
-            $result.Flags = "Potential savings: €$($result.Savings_EUR_Monthly)/mo ($($result.Savings_Percent)%)"
+        $result.Impact = $serverlessMoveImpact
+        $result.Flags = $serverlessMoveReason
+
+        if ($serverlessMoveImpact -eq 'High') {
+            $result.Priority = 'High'
+            $result.Confidence = 'High'
+        } elseif ($serverlessMoveImpact -eq 'Medium') {
+            $result.Priority = 'Medium'
+            $result.Confidence = 'High'
+        } else {
             $result.Priority = 'Low'
+            $result.Confidence = 'Medium'
+        }
+
+        $result.NextAction = 'Migrate to provisioned vCore'
+
+        # Continue to Tier 5 for final validation
+    } else {
+        # Normal classification-based optimization paths
+
+        switch ($result.Classification) {
+            'BURSTY' {
+                # Tier 4A: Serverless viability
+
+                # If already serverless, optimize min/max vCore
+                if ($isServerless) {
+                    $result.Serverless_Viable = $true
+                    $result.Status = 'OPTIMIZE'
+
+                    # Parse current capacity
+                    $currentVCores = $db.Capacity
+
+                    # Calculate optimal vCore range
+                    $optimalMinVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_P95 / 100 * 0.8))
+                    $optimalMaxVCore = [Math]::Max($optimalMinVCore, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
+
+                    if ($optimalMaxVCore -lt $currentVCores) {
+                        $result.Recommendation = 'Optimize serverless vCore range'
+                        $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
+                        $result.RecommendedCapacity = $optimalMinVCore
+                        $result.Recommended_Cost_EUR_Monthly = $optimalMinVCore * $Pricing['GP_S_Gen5_vCore']
+                        $result.Priority = 'Medium'
+                        $result.NextAction = 'Adjust serverless min/max vCore settings'
+                    } else {
+                        $result.Status = 'OK'
+                        $result.Recommendation = 'OK (serverless settings appropriate)'
+                        $result.Priority = 'Low'
+                    }
+                } else {
+                    # Not serverless yet - check if viable
+                    $serverlessDisqualifiers = @()
+
+                    if ($result.Connections_Per_Hour_Avg -gt 12) {
+                        # >1 per 5 min
+                        $serverlessDisqualifiers += 'High connection frequency'
+                    }
+
+                    if ($result.LogWrite_P95 -gt 40) {
+                        $serverlessDisqualifiers += 'Write-heavy workload'
+                    }
+
+                    if ($serverlessDisqualifiers.Count -eq 0) {
+                        $result.Serverless_Viable = $true
+                        $result.Status = 'OPTIMIZE'
+
+                        # Calculate vCore size
+                        $minVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_P95 / 100))
+                        $maxVCore = [Math]::Max($minVCore, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
+
+                        $result.Recommendation = 'Migrate to Serverless'
+                        $result.RecommendedTier = "GP_S_Gen5_$minVCore-$maxVCore"
+                        $result.RecommendedCapacity = $minVCore
+                        $result.Recommended_Cost_EUR_Monthly = $minVCore * $Pricing['GP_S_Gen5_vCore']
+                        $result.Priority = 'High'
+                        $result.NextAction = 'Test serverless migration'
+                    } else {
+                        $result.Serverless_Viable = $false
+                        $result.Flags = "Serverless blocked: $($serverlessDisqualifiers -join ', ')"
+                        # Fallback to Tier 4C
+                        $result.Classification = 'BURSTY_PROVISIONED'
+                    }
+                }
+            }
+
+            'SPARSE' {
+                # Similar to BURSTY for serverless
+                if ($isServerless) {
+                    # Already serverless - optimize
+                    $result.Serverless_Viable = $true
+                    $result.Status = 'OK'
+                    $result.Recommendation = 'OK (serverless appropriate for sparse usage)'
+                    $result.Priority = 'Low'
+
+                    # Check if we can optimize
+                    $optimalMaxVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
+
+                    if ($optimalMaxVCore -lt $db.Capacity) {
+                        $optimalMinVCore = 0.5
+                        $result.Status = 'OPTIMIZE'
+                        $result.Recommendation = 'Reduce serverless max vCore'
+                        $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
+                        $result.RecommendedCapacity = $optimalMinVCore
+                        $result.Recommended_Cost_EUR_Monthly = $optimalMinVCore * $Pricing['GP_S_Gen5_vCore']
+                        $result.Priority = 'Medium'
+                    }
+                } elseif ($result.Connections_Per_Hour_Avg -lt 2) {
+                    $result.Serverless_Viable = $true
+                    $result.Status = 'OPTIMIZE'
+                    $result.Recommendation = 'Migrate to Serverless (sparse usage)'
+                    $result.RecommendedTier = 'GP_S_Gen5_0.5-1'
+                    $result.RecommendedCapacity = 0.5
+                    $result.Recommended_Cost_EUR_Monthly = 0.5 * $Pricing['GP_S_Gen5_vCore']
+                    $result.Priority = 'High'
+                } else {
+                    $result.Status = 'REVIEW'
+                    $result.Recommendation = 'FLAG: Decommission review (sparse usage but connections prevent serverless)'
+                    $result.Priority = 'Medium'
+                }
+            }
+
+            'PERIODIC' {
+                # Tier 4B: Elastic pool candidate
+                $result.ElasticPool_Candidate = $true
+                $result.Status = 'OPTIMIZE'
+                $result.Recommendation = 'Elastic pool candidate (predictable pattern)'
+                $result.Flags = 'Requires multi-DB analysis for pool sizing'
+                $result.Priority = 'Medium'
+            }
+
+            'WEEKEND_WEEKDAY' {
+                # Tier 4B: Scheduled scaling or pool
+                $result.ElasticPool_Candidate = $true
+                $result.Status = 'OPTIMIZE'
+                $result.Recommendation = 'Scheduled scaling OR elastic pool'
+                $result.Flags = "Weekly pattern: weekday/weekend variance $([Math]::Round($weeklyVar, 0))%"
+                $result.Priority = 'Medium'
+            }
+
+            'BATCH_HEAVY' {
+                # Tier 4D: Workload split analysis
+                $result.Status = 'OPTIMIZE'
+                $result.Recommendation = 'Consider workload split (OLTP + batch)'
+                $result.Flags = 'Bimodal usage detected'
+                $result.Priority = 'Medium'
+                $result.NextAction = 'Assess if batch can be separated'
+            }
+
+            'CHAOTIC' {
+                # Tier 4F: Conservative provisioning
+                $result.Status = 'OK'
+                $targetCapacity = $computeP95 * 1.5  # 1.5x safety margin
+                $currentCapacity = if ($isDTU) { $DTULimits[$db.SkuName].DTU } else { $db.Capacity * 100 }
+
+                # Hyperscale cannot downgrade
+                if ($isHyperscale) {
+                    $result.Recommendation = 'OK (Hyperscale - high variance, query optimization advised)'
+                    $result.Flags = 'Chaotic pattern - Hyperscale tier cannot downgrade'
+                } elseif ($targetCapacity -lt $currentCapacity * 0.7) {
+                    $result.Recommendation = 'Conservative downgrade possible (high variance workload)'
+                    $result.Status = 'OPTIMIZE'
+                    $result.Priority = 'Low'
+                } else {
+                    $result.Recommendation = 'OK (high variance, query optimization advised)'
+                }
+
+                if (-not $result.Flags) {
+                    $result.Flags = 'Chaotic pattern - unpredictable peaks'
+                }
+                $result.Confidence = 'Low'
+            }
+
+            'UNCLASSIFIED' {
+                # Tier 4F: Conservative
+                $result.Status = 'OK'
+                $result.Recommendation = 'OK (workload pattern unclear)'
+                $result.Flags = 'Unclassified pattern'
+                $result.Confidence = 'Low'
+            }
+
+            default {
+                # STEADY, BURSTY_PROVISIONED, or fallback
+                # Tier 4C: Steady state optimization
+
+                # Calculate optimal tier (60-75% utilization target)
+                $optimalCapacity = $computeP95 * 1.2  # 20% headroom
+
+                if ($isDTU) {
+                    # Find optimal DTU tier
+                    $tiers = @('S0', 'S1', 'S2', 'S3', 'S4', 'S6', 'S7', 'S9', 'S12')
+                    $optimalTier = $null
+
+                    foreach ($tier in $tiers) {
+                        $tierCapacity = $DTULimits[$tier].DTU
+                        if ($optimalCapacity -le ($tierCapacity * 0.75)) {
+                            $optimalTier = $tier
+                            break
+                        }
+                    }
+
+                    if (-not $optimalTier) {
+                        # Check Premium
+                        $premiumTiers = @('P1', 'P2', 'P4', 'P6', 'P11', 'P15')
+                        foreach ($tier in $premiumTiers) {
+                            $tierCapacity = $DTULimits[$tier].DTU
+                            if ($optimalCapacity -le ($tierCapacity * 0.75)) {
+                                $optimalTier = $tier
+                                break
+                            }
+                        }
+                    }
+
+                    if ($optimalTier) {
+                        $currentCapacityValue = $DTULimits[$db.SkuName].DTU
+                        $optimalCapacityValue = $DTULimits[$optimalTier].DTU
+
+                        if ($computeP95 -ge ($currentCapacityValue * 0.6) -and $computeP95 -le ($currentCapacityValue * 0.8)) {
+                            # Current tier is optimal
+                            $result.Status = 'OK'
+                            $result.Recommendation = 'OK (optimal utilization)'
+                            $result.Confidence = 'High'
+                        } elseif ($optimalCapacityValue -lt $currentCapacityValue) {
+                            # Can downgrade
+                            $result.Status = 'OPTIMIZE'
+                            $result.Recommendation = "Downgrade to $optimalTier"
+                            $result.RecommendedTier = $optimalTier
+                            $result.Recommended_Cost_EUR_Monthly = Get-DatabaseCost -Edition 'Standard' -SkuName $optimalTier -Capacity 0
+                            $result.Priority = 'Medium'
+                            $result.Confidence = 'High'
+                        } else {
+                            $result.Status = 'OK'
+                            $result.Recommendation = 'OK (tier appropriate)'
+                        }
+                    } else {
+                        # Very high usage, consider vCore
+                        $result.Status = 'OPTIMIZE'
+                        $result.Recommendation = 'Consider migration to vCore (high DTU usage)'
+                        $result.Priority = 'Medium'
+                    }
+                } else {
+                    # vCore optimization
+
+                    # Hyperscale special handling
+                    if ($isHyperscale) {
+                        # Hyperscale cannot easily downgrade, only optimize vCores
+                        $optimalVCores = [Math]::Ceiling($result.CPU_P95 / 100 * 1.2)
+
+                        if ($result.CPU_P95 -ge 60 -and $result.CPU_P95 -le 80) {
+                            $result.Status = 'OK'
+                            $result.Recommendation = 'OK (Hyperscale utilization optimal)'
+                            $result.Flags = 'Hyperscale tier - storage auto-scales'
+                        } elseif ($optimalVCores -lt $db.Capacity) {
+                            $result.Status = 'OPTIMIZE'
+                            $result.Recommendation = "Reduce Hyperscale vCores to $optimalVCores"
+                            $result.RecommendedCapacity = $optimalVCores
+                            $result.Recommended_Cost_EUR_Monthly = $optimalVCores * $Pricing['GP_Gen5_vCore']
+                            $result.Priority = 'Medium'
+                            $result.Flags = 'Hyperscale tier - cannot downgrade to non-Hyperscale'
+                        } else {
+                            $result.Status = 'OK'
+                            $result.Recommendation = 'OK (Hyperscale vCores appropriate)'
+                            $result.Flags = 'Hyperscale tier - storage auto-scales'
+                        }
+                    } else {
+                        # Regular vCore optimization
+                        $optimalVCores = [Math]::Ceiling($result.CPU_P95 / 100 * 1.2)
+
+                        if ($result.CPU_P95 -ge 60 -and $result.CPU_P95 -le 80) {
+                            $result.Status = 'OK'
+                            $result.Recommendation = 'OK (optimal utilization)'
+                        } elseif ($optimalVCores -lt $db.Capacity) {
+                            $result.Status = 'OPTIMIZE'
+                            $result.Recommendation = "Reduce vCores to $optimalVCores"
+                            $result.RecommendedCapacity = $optimalVCores
+                            $result.Recommended_Cost_EUR_Monthly = $optimalVCores * $Pricing['GP_Gen5_vCore']
+                            $result.Priority = 'Medium'
+                        } else {
+                            $result.Status = 'OK'
+                            $result.Recommendation = 'OK (vCore appropriate)'
+                        }
+                    }
+                }
+            }
+        }
+    }  # End of else block for normal classification-based optimization
+
+    # TIER 5: Cost validation and Impact assessment
+    if ($result.Status -eq 'OPTIMIZE' -and $result.Recommended_Cost_EUR_Monthly -gt 0) {
+        # Calculate savings if not already set (serverless-to-provisioned already calculated)
+        if ($result.Savings_EUR_Monthly -eq 0) {
+            $result.Savings_EUR_Monthly = [Math]::Round($result.Current_Cost_EUR_Monthly - $result.Recommended_Cost_EUR_Monthly, 2)
+
+            if ($result.Current_Cost_EUR_Monthly -gt 0) {
+                $result.Savings_Percent = [Math]::Round(($result.Savings_EUR_Monthly / $result.Current_Cost_EUR_Monthly * 100), 2)
+            }
+        }
+
+        # Set Impact level based on savings (if not already set by serverless-to-provisioned logic)
+        if ($result.Impact -eq 'Medium' -and -not $serverlessShouldMoveToProvisioned) {
+            if ($result.Savings_EUR_Monthly -gt 100 -or $result.Savings_Percent -gt 50) {
+                $result.Impact = 'High'
+            } elseif ($result.Savings_EUR_Monthly -gt 50 -or $result.Savings_Percent -gt 30) {
+                $result.Impact = 'Medium'
+            } elseif ($result.Savings_EUR_Monthly -gt 0 -or $result.Savings_Percent -gt 0) {
+                $result.Impact = 'Low'
+            } else {
+                $result.Impact = 'None'
+            }
+        }
+
+        # Keep recommendation but adjust priority/flags for low-impact changes
+        if ($result.Savings_EUR_Monthly -lt 20 -and $result.Savings_Percent -lt 15) {
+            # Very low savings - mark as low impact but keep recommendation
+            $result.Impact = 'Low'
+            $result.Priority = 'Low'
+            $result.Flags = if ($result.Flags) {
+                "$($result.Flags) | Low cost impact: €$($result.Savings_EUR_Monthly)/mo ($($result.Savings_Percent)%)"
+            } else {
+                "Low cost impact: €$($result.Savings_EUR_Monthly)/mo ($($result.Savings_Percent)%)"
+            }
+        } elseif ($result.Savings_EUR_Monthly -lt 50 -and $result.Savings_Percent -lt 30) {
+            # Moderate savings
+            if ($result.Impact -eq 'Medium') {
+                $result.Priority = 'Medium'
+            }
+        } else {
+            # Good savings
+            if ($result.Impact -eq 'High' -and $result.Priority -ne 'High') {
+                $result.Priority = 'High'
+            }
+        }
+    }
+
+    # Set Impact for non-optimization recommendations
+    if ($result.Status -ne 'OPTIMIZE' -and $result.Impact -eq 'Medium') {
+        if ($result.Status -eq 'UPGRADE') {
+            $result.Impact = 'High'  # Upgrades are high impact (avoid constraints)
+        } elseif ($result.Status -eq 'REVIEW') {
+            $result.Impact = 'Medium'  # Reviews need attention
+        } else {
+            $result.Impact = 'None'  # OK status = no change needed
         }
     }
 
