@@ -134,7 +134,7 @@ function Get-LinearTrend {
 }
 
 function Get-Autocorrelation {
-    param([double[]]$Data, [int]$Lag = 24)
+    param([double[]]$Data, [int]$Lag = 288)  # 24 hours in 5-min intervals
     if ($Data.Count -lt ($Lag * 2)) { return 0 }
     
     $mean = ($Data | Measure-Object -Average).Average
@@ -175,7 +175,7 @@ function Test-BimodalDistribution {
 
 function Get-WeeklyVariance {
     param([object[]]$TimeSeries, [string]$ValueProperty)
-    if ($TimeSeries.Count -lt 168) { return 0 }  # Need at least 1 week
+    if ($TimeSeries.Count -lt 2016) { return 0 }  # Need at least 1 week (7 days × 24 hours × 12 intervals)
     
     $weekdays = $TimeSeries | Where-Object { 
         $dow = ([DateTime]$_.Timestamp).DayOfWeek
@@ -315,6 +315,25 @@ function Get-SkuCode {
     return $null
 }
 
+function Get-EstimatedServerlessCost {
+    param(
+        [double]$VCores,
+        [double]$IdlePercent
+    )
+    
+    # Base cost (if always on)
+    $baseCost = $VCores * $Pricing['GP_S_Gen5_vCore']
+    
+    # Estimate pause time (max 80% - storage is never paused)
+    $estimatedPauseTime = [Math]::Min($IdlePercent / 100, 0.8)
+    
+    # Apply 50% discount on compute during paused hours
+    # Formula: baseCost * (1 - (pauseTime * 0.5))
+    $estimatedCost = $baseCost * (1 - ($estimatedPauseTime * 0.5))
+    
+    return $estimatedCost
+}
+
 #endregion
 
 #region Data Import
@@ -330,13 +349,13 @@ $databases = Import-Csv $skuFile
 
 # Import metrics
 $metricFiles = @{
-    DTU         = "azsqldb_metric_dtu_consumption_percent.csv"
-    CPU         = "azsqldb_metric_cpu_percent.csv"
-    Workers     = "azsqldb_metric_workers_percent.csv"
-    Sessions    = "azsqldb_metric_sessions_percent.csv"
-    Storage     = "azsqldb_metric_storage_percent.csv"
+    DTU         = "azsqldb_metric_dtu_consumption.csv"
+    CPU         = "azsqldb_metric_cpu.csv"
+    Workers     = "azsqldb_metric_workers.csv"
+    Sessions    = "azsqldb_metric_sessions.csv"
+    Storage     = "azsqldb_metric_storage.csv"
     Connections = "azsqldb_metric_connection_successful.csv"
-    LogWrite    = "azsqldb_metric_log_write_percent.csv"
+    LogWrite    = "azsqldb_metric_log_write.csv"
 }
 
 $metrics = @{}
@@ -401,32 +420,32 @@ $results = foreach ($db in $databases) {
         Flags                   = ''
         
         # Statistics - Usage
-        DTU_Avg                 = 0
-        DTU_P95                 = 0
-        DTU_Max                 = 0
-        CPU_Avg                 = 0
-        CPU_P95                 = 0
-        CPU_Max                 = 0
-        CV_DTU                  = 0
-        CV_CPU                  = 0
-        Idle_Percent            = 0
+        DTU_Avg                 = $null
+        DTU_P95                 = $null
+        DTU_Max                 = $null
+        CPU_Avg                 = $null
+        CPU_P95                 = $null
+        CPU_Max                 = $null
+        CV_DTU                  = $null
+        CV_CPU                  = $null
+        Idle_Percent            = $null
         
         # Statistics - Resources
-        Sessions_Peak_Actual    = 0
-        Sessions_Peak_Percent   = 0
-        Workers_Peak_Actual     = 0
-        Workers_Peak_Percent    = 0
-        Storage_Used_GB         = 0
-        Storage_Percent         = 0
-        LogWrite_P95            = 0
+        Sessions_Peak_Actual    = $null
+        Sessions_Peak_Percent   = $null
+        Workers_Peak_Actual     = $null
+        Workers_Peak_Percent    = $null
+        Storage_Used_GB         = $null
+        Storage_Percent         = $null
+        LogWrite_P95            = $null
         
         # Statistics - Patterns
-        Connections_Per_Hour_Avg = 0
-        Pattern_Autocorrelation = 0
-        Weekly_Variance_Percent = 0
-        Growth_DTU_Trend        = 0
-        Growth_CPU_Trend        = 0
-        Growth_Storage_MB_Per_Month = 0
+        Connections_Per_Hour_Avg = $null
+        Pattern_Autocorrelation = $null
+        Weekly_Variance_Percent = $null
+        Growth_DTU_Trend        = $null
+        Growth_CPU_Trend        = $null
+        Growth_Storage_MB_Per_Month = $null
         Days_Of_Data            = 0
         
         # Decisions
@@ -474,20 +493,35 @@ $results = foreach ($db in $databases) {
         }
         
         # Check data sufficiency
-        if ($computeData.Count -lt 168) {
+        if ($computeData.Count -eq 0) {
+            # No data at all - likely permission issue
+            $result.Status = 'REVIEW'
+            $result.Classification = 'NO_DATA'
+            $result.Recommendation = "No metric data available (check permissions)"
+            $result.NextAction = 'Verify metric collection permissions'
+            $result.Confidence = 'Low'
+            $result.Priority = 'Low'
+            $result.Days_Of_Data = 0
+            $result.Flags = 'No metric data collected - permission issue or collection failure'
+            # Leave all metric values as 0 (default) - they're unknown, not actually zero
+            $result
+            continue
+        }
+        
+        if ($computeData.Count -lt 2016) {  # Less than 7 days (5-min intervals)
             $result.Status = 'OK'
             $result.Classification = 'IN_POOL'
             $result.Recommendation = "OK (in elastic pool '$($db.ElasticPoolName)', insufficient data)"
             $result.NextAction = 'Monitor pool performance'
             $result.Confidence = 'Low'
             $result.Priority = 'Low'
-            $result.Days_Of_Data = [Math]::Round($computeData.Count / 24, 1)
+            $result.Days_Of_Data = [Math]::Round($computeData.Count / 288, 1)  # 288 intervals per day
             $result.Flags = 'Part of elastic pool - individual optimization not applicable'
             $result
             continue
         }
         
-        $result.Days_Of_Data = [Math]::Round($computeData.Count / 24, 1)
+        $result.Days_Of_Data = [Math]::Round($computeData.Count / 288, 1)  # 288 intervals per day
         
         # Calculate basic statistics for pooled database
         $cpuValues = $computeData.Nominal_Value
@@ -573,20 +607,36 @@ $results = foreach ($db in $databases) {
     }
     
     # Check data sufficiency (Tier 2)
-    if ($computeData.Count -lt 168) {  # Less than 7 days of hourly data
+    if ($computeData.Count -eq 0) {
+        # No data at all - likely permission issue
+        $result.Status = 'REVIEW'
+        $result.Classification = 'NO_DATA'
+        $result.Recommendation = 'No metric data available (check permissions)'
+        $result.NextAction = 'Verify metric collection permissions'
+        $result.Confidence = 'Low'
+        $result.Priority = 'Low'
+        $result.Days_Of_Data = 0
+        $result.Flags = 'No metric data collected - permission issue or collection failure'
+        $result.Current_Cost_EUR_Monthly = Get-DatabaseCost -Edition $db.Edition -SkuName $db.SkuName -Capacity $db.Capacity
+        # Leave all metrics as 0 - they're unknown, not actually zero
+        $result
+        continue
+    }
+    
+    if ($computeData.Count -lt 2016) {  # Less than 7 days (5-min intervals: 7×24×12)
         $result.Status = 'REVIEW'
         $result.Classification = 'INSUFFICIENT_DATA'
         $result.Recommendation = 'OK (insufficient data for analysis)'
         $result.NextAction = 'Re-analyze after day 30'
         $result.Confidence = 'Low'
         $result.Priority = 'Low'
-        $result.Days_Of_Data = [Math]::Round($computeData.Count / 24, 1)
+        $result.Days_Of_Data = [Math]::Round($computeData.Count / 288, 1)  # 288 intervals per day
         $result.Current_Cost_EUR_Monthly = Get-DatabaseCost -Edition $db.Edition -SkuName $db.SkuName -Capacity $db.Capacity
         $result
         continue
     }
     
-    $result.Days_Of_Data = [Math]::Round($computeData.Count / 24, 1)
+    $result.Days_Of_Data = [Math]::Round($computeData.Count / 288, 1)  # 288 intervals per day
     
     # Calculate statistics
     if ($isDTU) {
@@ -600,7 +650,7 @@ $results = foreach ($db in $databases) {
         $result.Idle_Percent = [Math]::Round(($idleCount / $computeData.Count * 100), 2)
         
         $result.Growth_DTU_Trend = [Math]::Round((Get-LinearTrend -TimeSeries $computeData -ValueProperty 'Nominal_Value'), 2)
-        $result.Pattern_Autocorrelation = [Math]::Round((Get-Autocorrelation -Data $dtuValues -Lag 24), 2)
+        $result.Pattern_Autocorrelation = [Math]::Round((Get-Autocorrelation -Data $dtuValues -Lag 288), 2)  # 24 hours in 5-min intervals
         $result.Weekly_Variance_Percent = [Math]::Round((Get-WeeklyVariance -TimeSeries $computeData -ValueProperty 'Nominal_Value'), 2)
         
         $computeMetricName = 'DTU'
@@ -616,7 +666,7 @@ $results = foreach ($db in $databases) {
         $result.Idle_Percent = [Math]::Round(($idleCount / $computeData.Count * 100), 2)
         
         $result.Growth_CPU_Trend = [Math]::Round((Get-LinearTrend -TimeSeries $computeData -ValueProperty 'Nominal_Value'), 2)
-        $result.Pattern_Autocorrelation = [Math]::Round((Get-Autocorrelation -Data $cpuValues -Lag 24), 2)
+        $result.Pattern_Autocorrelation = [Math]::Round((Get-Autocorrelation -Data $cpuValues -Lag 288), 2)  # 24 hours in 5-min intervals
         $result.Weekly_Variance_Percent = [Math]::Round((Get-WeeklyVariance -TimeSeries $computeData -ValueProperty 'Nominal_Value'), 2)
         
         $computeMetricName = 'CPU'
@@ -657,7 +707,12 @@ $results = foreach ($db in $databases) {
     }
     
     # Current cost
-    $result.Current_Cost_EUR_Monthly = Get-DatabaseCost -Edition $db.Edition -SkuName $db.SkuName -Capacity $db.Capacity
+    if ($isServerless) {
+        # For serverless, calculate estimated cost with auto-pause
+        $result.Current_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores $db.Capacity -IdlePercent $result.Idle_Percent
+    } else {
+        $result.Current_Cost_EUR_Monthly = Get-DatabaseCost -Edition $db.Edition -SkuName $db.SkuName -Capacity $db.Capacity
+    }
     
     #region Decision Tree
     
@@ -801,13 +856,9 @@ $results = foreach ($db in $databases) {
     $serverlessMoveImpact = 'Medium'
     
     if ($isServerless) {
-        # Cost comparison: serverless always-on vs provisioned
-        $currentServerlessCost = $db.Capacity * $Pricing['GP_S_Gen5_vCore']
+        # Cost comparison: serverless vs provisioned
+        $estimatedServerlessCost = Get-EstimatedServerlessCost -VCores $db.Capacity -IdlePercent $result.Idle_Percent
         $provisionedCost = $db.Capacity * $Pricing['GP_Gen5_vCore']
-        
-        # Estimate actual serverless cost with auto-pause (50% discount when paused)
-        $estimatedPauseTime = [Math]::Min($result.Idle_Percent / 100, 0.8)  # Max 80% pause
-        $estimatedServerlessCost = $currentServerlessCost * (1 - ($estimatedPauseTime * 0.5))
         
         # Reasons to move to provisioned:
         
@@ -834,7 +885,7 @@ $results = foreach ($db in $databases) {
             } else { 
                 'Constant connections prevent auto-pause' 
             }
-            $costSavings = $currentServerlessCost - $provisionedCost
+            $costSavings = $estimatedServerlessCost - $provisionedCost
             
             if ($costSavings -gt 50) {
                 $serverlessMoveImpact = 'High'
@@ -927,7 +978,7 @@ $results = foreach ($db in $databases) {
                     $result.Recommendation = "Optimize serverless vCore range"
                     $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
                     $result.RecommendedCapacity = $optimalMinVCore
-                    $result.Recommended_Cost_EUR_Monthly = $optimalMinVCore * $Pricing['GP_S_Gen5_vCore']
+                    $result.Recommended_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores $optimalMinVCore -IdlePercent $result.Idle_Percent
                     $result.Priority = 'Medium'
                     $result.NextAction = "Adjust serverless min/max vCore settings"
                 } else {
@@ -955,10 +1006,13 @@ $results = foreach ($db in $databases) {
                     $minVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_P95 / 100))
                     $maxVCore = [Math]::Max($minVCore, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
                     
+                    # Calculate estimated cost with auto-pause
+                    $estimatedServerlessCost = Get-EstimatedServerlessCost -VCores $minVCore -IdlePercent $result.Idle_Percent
+                    
                     $result.Recommendation = "Migrate to Serverless"
                     $result.RecommendedTier = "GP_S_Gen5_$minVCore-$maxVCore"
                     $result.RecommendedCapacity = $minVCore
-                    $result.Recommended_Cost_EUR_Monthly = $minVCore * $Pricing['GP_S_Gen5_vCore']
+                    $result.Recommended_Cost_EUR_Monthly = $estimatedServerlessCost
                     $result.Priority = 'High'
                     $result.NextAction = "Test serverless migration"
                 } else {
@@ -988,7 +1042,7 @@ $results = foreach ($db in $databases) {
                     $result.Recommendation = "Reduce serverless max vCore"
                     $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
                     $result.RecommendedCapacity = $optimalMinVCore
-                    $result.Recommended_Cost_EUR_Monthly = $optimalMinVCore * $Pricing['GP_S_Gen5_vCore']
+                    $result.Recommended_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores $optimalMinVCore -IdlePercent $result.Idle_Percent
                     $result.Priority = 'Medium'
                 }
             } elseif ($result.Connections_Per_Hour_Avg -lt 2) {
@@ -997,7 +1051,7 @@ $results = foreach ($db in $databases) {
                 $result.Recommendation = "Migrate to Serverless (sparse usage)"
                 $result.RecommendedTier = "GP_S_Gen5_0.5-1"
                 $result.RecommendedCapacity = 0.5
-                $result.Recommended_Cost_EUR_Monthly = 0.5 * $Pricing['GP_S_Gen5_vCore']
+                $result.Recommended_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores 0.5 -IdlePercent $result.Idle_Percent
                 $result.Priority = 'High'
             } else {
                 $result.Status = 'REVIEW'
@@ -1238,3 +1292,4 @@ $results = foreach ($db in $databases) {
 
 # Output results
 $results
+
