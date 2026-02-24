@@ -86,7 +86,14 @@ $Pricing = @{
     # Elastic Pool per eDTU
     'Pool_Standard_eDTU' = 1.34
     'Pool_Premium_eDTU' = 3.21
+    
+    # Storage pricing (per GB per month)
+    'Storage_GB_Monthly' = 0.115  # Standard storage, West Europe
 }
+
+# Scheduled pause automation cost (EUR per month)
+# Assumes single Azure Automation account managing multiple databases
+$AutomationCostMonthly = 10
 
 #endregion
 
@@ -287,7 +294,7 @@ function Get-SkuCode {
         return 'Basic'
     }
     elseif ($Edition -eq 'Standard') {
-        return switch ($Capacity) {
+        return $(switch ($Capacity) {
             10    { 'S0' }
             20    { 'S1' }
             50    { 'S2' }
@@ -298,10 +305,10 @@ function Get-SkuCode {
             1600  { 'S9' }
             3000  { 'S12' }
             default { $null }
-        }
+        })
     }
     elseif ($Edition -eq 'Premium') {
-        return switch ($Capacity) {
+        return $(switch ($Capacity) {
             125   { 'P1' }
             250   { 'P2' }
             500   { 'P4' }
@@ -309,7 +316,7 @@ function Get-SkuCode {
             1750  { 'P11' }
             4000  { 'P15' }
             default { $null }
-        }
+        })
     }
     
     return $null
@@ -318,20 +325,230 @@ function Get-SkuCode {
 function Get-EstimatedServerlessCost {
     param(
         [double]$VCores,
-        [double]$IdlePercent
+        [object[]]$TimeSeries,
+        [string]$ValueProperty,
+        [double]$StorageGB
     )
     
-    # Base cost (if always on)
-    $baseCost = $VCores * $Pricing['GP_S_Gen5_vCore']
+    if ($TimeSeries.Count -eq 0) {
+        return [PSCustomObject]@{
+            ComputeCost = 0
+            StorageCost = 0
+            TotalCost = 0
+            ActiveHoursMonthly = 0
+        }
+    }
     
-    # Estimate pause time (max 80% - storage is never paused)
-    $estimatedPauseTime = [Math]::Min($IdlePercent / 100, 0.8)
+    # Calculate active hours (slots with >5% usage)
+    $activeSlots = $TimeSeries | Where-Object { $_.$ValueProperty -gt 5 }
+    $activeHoursPerDay = ($activeSlots.Count / 288)  # 288 five-minute intervals per day
+    $activeHoursPerMonth = $activeHoursPerDay * 30
     
-    # Apply 50% discount on compute during paused hours
-    # Formula: baseCost * (1 - (pauseTime * 0.5))
-    $estimatedCost = $baseCost * (1 - ($estimatedPauseTime * 0.5))
+    # Serverless compute cost (billed per second when active)
+    # Price is per month, so divide by 730 hours to get hourly rate
+    $computeCostPerHour = ($VCores * $Pricing['GP_S_Gen5_vCore']) / 730
+    $computeCost = $activeHoursPerMonth * $computeCostPerHour
     
-    return $estimatedCost
+    # Storage cost (always billed, even when paused)
+    $storageCost = $StorageGB * $Pricing['Storage_GB_Monthly']
+    
+    return [PSCustomObject]@{
+        ComputeCost = [Math]::Round($computeCost, 2)
+        StorageCost = [Math]::Round($storageCost, 2)
+        TotalCost = [Math]::Round($computeCost + $storageCost, 2)
+        ActiveHoursMonthly = [Math]::Round($activeHoursPerMonth, 1)
+    }
+}
+
+function Get-WeeklyBusyWindows {
+    param(
+        [object[]]$TimeSeries,
+        [string]$ValueProperty,
+        [double]$BusyThreshold
+    )
+    
+    if ($TimeSeries.Count -eq 0) { return @() }
+    
+    # Group by day-of-week + time slot
+    $weeklySlots = $TimeSeries | Group-Object {
+        $dt = [DateTime]$_.Timestamp
+        "$($dt.DayOfWeek) $($dt.ToString('HH:mm'))"
+    }
+    
+    # Calculate average for each weekly slot
+    $slotAverages = $weeklySlots | ForEach-Object {
+        $parts = $_.Name -split ' '
+        [PSCustomObject]@{
+            DayOfWeek = $parts[0]
+            Time = $parts[1]
+            Avg = ($_.Group.$ValueProperty | Measure-Object -Average).Average
+        }
+    } | Where-Object { $_.Avg -gt $BusyThreshold }
+    
+    if ($slotAverages.Count -eq 0) { return @() }
+    
+    # Sort by day order then time
+    $dayOrder = @{Monday=1; Tuesday=2; Wednesday=3; Thursday=4; Friday=5; Saturday=6; Sunday=7}
+    $slotAverages = $slotAverages | Sort-Object { 
+        $dayOrder[$_.DayOfWeek] * 10000 + [int]$_.Time.Replace(':','')
+    }
+    
+    # Group contiguous slots into windows
+    $windows = @()
+    $currentWindow = $null
+    
+    foreach ($slot in $slotAverages) {
+        if (-not $currentWindow) {
+            # Start new window
+            $currentWindow = @{
+                Day = $slot.DayOfWeek
+                Start = $slot.Time
+                End = $slot.Time
+                AvgUsage = @($slot.Avg)
+            }
+        }
+        elseif ($currentWindow.Day -eq $slot.DayOfWeek) {
+            # Same day - check if contiguous (5 minutes apart)
+            $currentEndTime = [DateTime]::ParseExact($currentWindow.End, 'HH:mm', $null)
+            $slotTime = [DateTime]::ParseExact($slot.Time, 'HH:mm', $null)
+            $diffMinutes = ($slotTime - $currentEndTime).TotalMinutes
+            
+            if ($diffMinutes -eq 5) {
+                # Extend current window
+                $currentWindow.End = $slot.Time
+                $currentWindow.AvgUsage += $slot.Avg
+            }
+            else {
+                # Gap detected - save current window and start new one
+                $startTime = [DateTime]::ParseExact($currentWindow.Start, 'HH:mm', $null)
+                $endTime = [DateTime]::ParseExact($currentWindow.End, 'HH:mm', $null)
+                $durationHours = ($endTime - $startTime).TotalHours + (5.0/60)  # Add final 5-min slot
+                
+                $windows += [PSCustomObject]@{
+                    Period = "$($currentWindow.Day) $($currentWindow.Start)-$($currentWindow.End)"
+                    AvgUsage = [Math]::Round(($currentWindow.AvgUsage | Measure-Object -Average).Average, 2)
+                    DurationHours = [Math]::Round($durationHours, 2)
+                }
+                
+                $currentWindow = @{
+                    Day = $slot.DayOfWeek
+                    Start = $slot.Time
+                    End = $slot.Time
+                    AvgUsage = @($slot.Avg)
+                }
+            }
+        }
+        else {
+            # Different day - save current window and start new one
+            $startTime = [DateTime]::ParseExact($currentWindow.Start, 'HH:mm', $null)
+            $endTime = [DateTime]::ParseExact($currentWindow.End, 'HH:mm', $null)
+            $durationHours = ($endTime - $startTime).TotalHours + (5.0/60)
+            
+            $windows += [PSCustomObject]@{
+                Period = "$($currentWindow.Day) $($currentWindow.Start)-$($currentWindow.End)"
+                AvgUsage = [Math]::Round(($currentWindow.AvgUsage | Measure-Object -Average).Average, 2)
+                DurationHours = [Math]::Round($durationHours, 2)
+            }
+            
+            $currentWindow = @{
+                Day = $slot.DayOfWeek
+                Start = $slot.Time
+                End = $slot.Time
+                AvgUsage = @($slot.Avg)
+            }
+        }
+    }
+    
+    # Add last window
+    if ($currentWindow) {
+        $startTime = [DateTime]::ParseExact($currentWindow.Start, 'HH:mm', $null)
+        $endTime = [DateTime]::ParseExact($currentWindow.End, 'HH:mm', $null)
+        $durationHours = ($endTime - $startTime).TotalHours + (5.0/60)
+        
+        $windows += [PSCustomObject]@{
+            Period = "$($currentWindow.Day) $($currentWindow.Start)-$($currentWindow.End)"
+            AvgUsage = [Math]::Round(($currentWindow.AvgUsage | Measure-Object -Average).Average, 2)
+            DurationHours = [Math]::Round($durationHours, 2)
+        }
+    }
+    
+    return $windows
+}
+
+function Get-PredictabilityScore {
+    param(
+        [object[]]$TimeSeries,
+        [string]$ValueProperty,
+        [double]$BusyThreshold
+    )
+    
+    if ($TimeSeries.Count -lt 288) { return 0 }  # Need at least 1 day
+    
+    # Calculate busy hours per day
+    $dailyBusyHours = $TimeSeries | 
+        Group-Object { ([DateTime]$_.Timestamp).Date } | 
+        ForEach-Object {
+            $busySlots = $_.Group | Where-Object { $_.$ValueProperty -gt $BusyThreshold }
+            $busySlots.Count / 12  # 12 five-minute intervals per hour
+        }
+    
+    if ($dailyBusyHours.Count -eq 0) { return 0 }
+    
+    # Calculate coefficient of variation
+    $stats = $dailyBusyHours | Measure-Object -Average -StandardDeviation
+    
+    if ($stats.Average -eq 0) { return 0 }
+    
+    $cv = ($stats.StandardDeviation / $stats.Average) * 100
+    
+    # Score: 100 = perfectly predictable (CV=0), 0 = chaotic (CV>=100)
+    # CV < 20 = excellent (score 80-100)
+    # CV 20-50 = good (score 50-80)
+    # CV 50-100 = fair (score 0-50)
+    # CV > 100 = poor (score 0)
+    
+    $score = [Math]::Max(0, [Math]::Min(100, 100 - $cv))
+    
+    return [Math]::Round($score, 0)
+}
+
+function Get-ScheduledPauseCost {
+    param(
+        [double]$CurrentCost,
+        [object[]]$BusyWindows,
+        [double]$BufferHours = 0.5
+    )
+    
+    if ($BusyWindows.Count -eq 0) {
+        return [PSCustomObject]@{
+            RuntimeCost = 0
+            AutomationCost = 0
+            TotalCost = 0
+            ActiveHoursWeekly = 0
+            ActiveFraction = 0
+        }
+    }
+    
+    # Total busy hours per week
+    $busyHoursPerWeek = ($BusyWindows.DurationHours | Measure-Object -Sum).Sum
+    
+    # Add buffer for startup/shutdown (30 min each side per window)
+    $totalActiveHoursPerWeek = $busyHoursPerWeek + ($BusyWindows.Count * $BufferHours * 2)
+    
+    # Calculate runtime cost
+    $activeFraction = $totalActiveHoursPerWeek / 168  # 168 hours per week
+    $runtimeCost = $CurrentCost * $activeFraction
+    
+    # Azure Automation cost
+    $automationCost = $AutomationCostMonthly
+    
+    return [PSCustomObject]@{
+        RuntimeCost = [Math]::Round($runtimeCost, 2)
+        AutomationCost = $automationCost
+        TotalCost = [Math]::Round($runtimeCost + $automationCost, 2)
+        ActiveHoursWeekly = [Math]::Round($totalActiveHoursPerWeek, 1)
+        ActiveFraction = [Math]::Round($activeFraction * 100, 1)
+    }
 }
 
 #endregion
@@ -345,7 +562,7 @@ $skuFile = Join-Path $MetricsPath "AzSQLDb_SKU.csv"
 if (-not (Test-Path $skuFile)) {
     throw "SKU file not found: $skuFile"
 }
-$databases = Import-Csv $skuFile
+$databases = Import-Csv $skuFile -Delimiter "`t"
 
 # Import metrics
 $metricFiles = @{
@@ -363,7 +580,7 @@ foreach ($metricName in $metricFiles.Keys) {
     $file = Join-Path $MetricsPath $metricFiles[$metricName]
     if (Test-Path $file) {
         Write-Verbose "Importing $metricName metrics"
-        $metrics[$metricName] = Import-Csv $file
+        $metrics[$metricName] = Import-Csv $file -Delimiter "`t"
     } else {
         Write-Warning "Metric file not found: $file"
         $metrics[$metricName] = @()
@@ -448,6 +665,13 @@ $results = foreach ($db in $databases) {
         Growth_Storage_MB_Per_Month = $null
         Days_Of_Data            = 0
         
+        # Busy Period Detection
+        Busy_Windows            = $null
+        Busy_Hours_Per_Week     = $null
+        Active_Hours_Per_Day_Avg = $null
+        Pattern_Predictability_Score = $null
+        Scheduled_Pause_Feasibility = $null
+        
         # Decisions
         Serverless_Viable       = $false
         ElasticPool_Candidate   = $false
@@ -457,6 +681,20 @@ $results = foreach ($db in $databases) {
         Recommended_Cost_EUR_Monthly = 0
         Savings_EUR_Monthly     = 0
         Savings_Percent         = 0
+        Alternative_Recommendation = $null
+        Alternative_Cost_EUR_Monthly = $null
+        
+        # Serverless Cost Breakdown
+        Serverless_Active_Hours_Monthly = $null
+        Serverless_Compute_Cost = $null
+        Serverless_Storage_Cost = $null
+        Serverless_Total_Cost   = $null
+        
+        # Scheduled Pause Cost Breakdown
+        Scheduled_Pause_Runtime_Cost = $null
+        Scheduled_Pause_Automation_Cost = $null
+        Scheduled_Pause_Active_Hours_Weekly = $null
+        Scheduled_Pause_Total_Cost = $null
     }
     
     # Get metrics for this database
@@ -469,27 +707,27 @@ $results = foreach ($db in $databases) {
         
         # We can still get CPU, sessions, workers, storage metrics
         $computeData = $metrics.CPU | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         $sessionsData = $metrics.Sessions | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         $workersData = $metrics.Workers | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         $storageData = $metrics.Storage | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         $connectionsData = $metrics.Connections | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         $logWriteData = $metrics.LogWrite | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         # Check data sufficiency
@@ -569,41 +807,41 @@ $results = foreach ($db in $databases) {
     # Get time-series data
     if ($isDTU) {
         $computeData = $metrics.DTU | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
         
         # Fallback to CPU if DTU metrics missing
         if ($computeData.Count -eq 0) {
             Write-Warning "DTU metrics missing for $dbKey, using CPU metrics as fallback"
             $computeData = $metrics.CPU | Where-Object { 
-                "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+                "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
             }
             $isDTU = $false  # Treat as vCore for analysis
         }
     } else {
         $computeData = $metrics.CPU | Where-Object { 
-            "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+            "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
         }
     }
     
     $sessionsData = $metrics.Sessions | Where-Object { 
-        "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+        "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
     }
     
     $workersData = $metrics.Workers | Where-Object { 
-        "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+        "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
     }
     
     $storageData = $metrics.Storage | Where-Object { 
-        "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+        "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
     }
     
     $connectionsData = $metrics.Connections | Where-Object { 
-        "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+        "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
     }
     
     $logWriteData = $metrics.LogWrite | Where-Object { 
-        "$($_.ServerName)|$($_.DatabaseName)" -eq $dbKey 
+        "$($_.ServerName)|$($_.DBName)" -eq $dbKey 
     }
     
     # Check data sufficiency (Tier 2)
@@ -708,10 +946,26 @@ $results = foreach ($db in $databases) {
     
     # Current cost
     if ($isServerless) {
-        # For serverless, calculate estimated cost with auto-pause
-        $result.Current_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores $db.Capacity -IdlePercent $result.Idle_Percent
+        # For serverless, calculate estimated cost with active hours
+        $serverlessCostCalc = Get-EstimatedServerlessCost -VCores $db.Capacity -TimeSeries $computeData -ValueProperty 'Metric_Value' -StorageGB $result.Storage_Used_GB
+        $result.Current_Cost_EUR_Monthly = $serverlessCostCalc.TotalCost
     } else {
         $result.Current_Cost_EUR_Monthly = Get-DatabaseCost -Edition $db.Edition -SkuName $db.SkuName -Capacity $db.Capacity
+    }
+    
+    # Detect busy windows and calculate predictability
+    $busyThreshold = $computeP95 * 0.10
+    $busyWindows = Get-WeeklyBusyWindows -TimeSeries $computeData -ValueProperty 'Nominal_Value' -BusyThreshold $busyThreshold
+    
+    if ($busyWindows.Count -gt 0) {
+        # Format busy windows
+        $result.Busy_Windows = ($busyWindows.Period -join ', ')
+        $result.Busy_Hours_Per_Week = [Math]::Round(($busyWindows.DurationHours | Measure-Object -Sum).Sum, 1)
+        $result.Active_Hours_Per_Day_Avg = [Math]::Round($result.Busy_Hours_Per_Week / 7, 1)
+        
+        # Calculate predictability score
+        $result.Pattern_Predictability_Score = Get-PredictabilityScore -TimeSeries $computeData -ValueProperty 'Nominal_Value' -BusyThreshold $busyThreshold
+        $result.Scheduled_Pause_Feasibility = $result.Pattern_Predictability_Score
     }
     
     #region Decision Tree
@@ -978,7 +1232,14 @@ $results = foreach ($db in $databases) {
                     $result.Recommendation = "Optimize serverless vCore range"
                     $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
                     $result.RecommendedCapacity = $optimalMinVCore
-                    $result.Recommended_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores $optimalMinVCore -IdlePercent $result.Idle_Percent
+                    
+                    $serverlessCostCalc = Get-EstimatedServerlessCost -VCores $optimalMinVCore -TimeSeries $computeData -ValueProperty 'Metric_Value' -StorageGB $result.Storage_Used_GB
+                    $result.Recommended_Cost_EUR_Monthly = $serverlessCostCalc.TotalCost
+                    $result.Serverless_Active_Hours_Monthly = $serverlessCostCalc.ActiveHoursMonthly
+                    $result.Serverless_Compute_Cost = $serverlessCostCalc.ComputeCost
+                    $result.Serverless_Storage_Cost = $serverlessCostCalc.StorageCost
+                    $result.Serverless_Total_Cost = $serverlessCostCalc.TotalCost
+                    
                     $result.Priority = 'Medium'
                     $result.NextAction = "Adjust serverless min/max vCore settings"
                 } else {
@@ -1006,15 +1267,50 @@ $results = foreach ($db in $databases) {
                     $minVCore = [Math]::Max(0.5, [Math]::Ceiling($result.CPU_P95 / 100))
                     $maxVCore = [Math]::Max($minVCore, [Math]::Ceiling($result.CPU_Max / 100 * 1.2))
                     
-                    # Calculate estimated cost with auto-pause
-                    $estimatedServerlessCost = Get-EstimatedServerlessCost -VCores $minVCore -IdlePercent $result.Idle_Percent
+                    # Calculate serverless cost breakdown
+                    $serverlessCostCalc = Get-EstimatedServerlessCost -VCores $minVCore -TimeSeries $computeData -ValueProperty 'Metric_Value' -StorageGB $result.Storage_Used_GB
+                    $result.Serverless_Active_Hours_Monthly = $serverlessCostCalc.ActiveHoursMonthly
+                    $result.Serverless_Compute_Cost = $serverlessCostCalc.ComputeCost
+                    $result.Serverless_Storage_Cost = $serverlessCostCalc.StorageCost
+                    $result.Serverless_Total_Cost = $serverlessCostCalc.TotalCost
                     
-                    $result.Recommendation = "Migrate to Serverless"
+                    # Calculate scheduled pause cost if pattern is predictable
+                    if ($busyWindows.Count -gt 0) {
+                        $scheduledCostCalc = Get-ScheduledPauseCost -CurrentCost $result.Current_Cost_EUR_Monthly -BusyWindows $busyWindows
+                        $result.Scheduled_Pause_Runtime_Cost = $scheduledCostCalc.RuntimeCost
+                        $result.Scheduled_Pause_Automation_Cost = $scheduledCostCalc.AutomationCost
+                        $result.Scheduled_Pause_Active_Hours_Weekly = $scheduledCostCalc.ActiveHoursWeekly
+                        $result.Scheduled_Pause_Total_Cost = $scheduledCostCalc.TotalCost
+                    }
+                    
+                    # Compare options and pick best
+                    $options = @(
+                        [PSCustomObject]@{ Name = "Serverless"; Cost = $result.Serverless_Total_Cost }
+                    )
+                    
+                    if ($result.Scheduled_Pause_Total_Cost -and $result.Pattern_Predictability_Score -ge 40) {
+                        $options += [PSCustomObject]@{ Name = "Scheduled pause"; Cost = $result.Scheduled_Pause_Total_Cost }
+                    }
+                    
+                    $best = $options | Sort-Object Cost | Select-Object -First 1
+                    $alternative = $options | Where-Object { $_.Name -ne $best.Name } | Sort-Object Cost | Select-Object -First 1
+                    
+                    $result.Recommendation = "Migrate to $($best.Name)"
                     $result.RecommendedTier = "GP_S_Gen5_$minVCore-$maxVCore"
                     $result.RecommendedCapacity = $minVCore
-                    $result.Recommended_Cost_EUR_Monthly = $estimatedServerlessCost
+                    $result.Recommended_Cost_EUR_Monthly = $best.Cost
+                    
+                    if ($alternative) {
+                        $result.Alternative_Recommendation = "$($alternative.Name) (€$($alternative.Cost))"
+                        $result.Alternative_Cost_EUR_Monthly = $alternative.Cost
+                    }
+                    
                     $result.Priority = 'High'
                     $result.NextAction = "Test serverless migration"
+                    
+                    if ($result.Scheduled_Pause_Feasibility) {
+                        $result.Flags = "Scheduled pause feasibility: $($result.Scheduled_Pause_Feasibility)"
+                    }
                 } else {
                     $result.Serverless_Viable = $false
                     $result.Flags = "Serverless blocked: $($serverlessDisqualifiers -join ', ')"
@@ -1042,17 +1338,63 @@ $results = foreach ($db in $databases) {
                     $result.Recommendation = "Reduce serverless max vCore"
                     $result.RecommendedTier = "GP_S_Gen5_$optimalMinVCore-$optimalMaxVCore"
                     $result.RecommendedCapacity = $optimalMinVCore
-                    $result.Recommended_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores $optimalMinVCore -IdlePercent $result.Idle_Percent
+                    
+                    $serverlessCostCalc = Get-EstimatedServerlessCost -VCores $optimalMinVCore -TimeSeries $computeData -ValueProperty 'Metric_Value' -StorageGB $result.Storage_Used_GB
+                    $result.Recommended_Cost_EUR_Monthly = $serverlessCostCalc.TotalCost
+                    $result.Serverless_Active_Hours_Monthly = $serverlessCostCalc.ActiveHoursMonthly
+                    $result.Serverless_Compute_Cost = $serverlessCostCalc.ComputeCost
+                    $result.Serverless_Storage_Cost = $serverlessCostCalc.StorageCost
+                    $result.Serverless_Total_Cost = $serverlessCostCalc.TotalCost
+                    
                     $result.Priority = 'Medium'
                 }
             } elseif ($result.Connections_Per_Hour_Avg -lt 2) {
                 $result.Serverless_Viable = $true
                 $result.Status = 'OPTIMIZE'
-                $result.Recommendation = "Migrate to Serverless (sparse usage)"
+                
+                # Calculate serverless cost breakdown
+                $serverlessCostCalc = Get-EstimatedServerlessCost -VCores 0.5 -TimeSeries $computeData -ValueProperty 'Metric_Value' -StorageGB $result.Storage_Used_GB
+                $result.Serverless_Active_Hours_Monthly = $serverlessCostCalc.ActiveHoursMonthly
+                $result.Serverless_Compute_Cost = $serverlessCostCalc.ComputeCost
+                $result.Serverless_Storage_Cost = $serverlessCostCalc.StorageCost
+                $result.Serverless_Total_Cost = $serverlessCostCalc.TotalCost
+                
+                # Calculate scheduled pause cost if pattern is predictable
+                if ($busyWindows.Count -gt 0) {
+                    $scheduledCostCalc = Get-ScheduledPauseCost -CurrentCost $result.Current_Cost_EUR_Monthly -BusyWindows $busyWindows
+                    $result.Scheduled_Pause_Runtime_Cost = $scheduledCostCalc.RuntimeCost
+                    $result.Scheduled_Pause_Automation_Cost = $scheduledCostCalc.AutomationCost
+                    $result.Scheduled_Pause_Active_Hours_Weekly = $scheduledCostCalc.ActiveHoursWeekly
+                    $result.Scheduled_Pause_Total_Cost = $scheduledCostCalc.TotalCost
+                }
+                
+                # Compare options
+                $options = @(
+                    [PSCustomObject]@{ Name = "Serverless"; Cost = $result.Serverless_Total_Cost }
+                )
+                
+                if ($result.Scheduled_Pause_Total_Cost -and $result.Pattern_Predictability_Score -ge 40) {
+                    $options += [PSCustomObject]@{ Name = "Scheduled pause"; Cost = $result.Scheduled_Pause_Total_Cost }
+                }
+                
+                $best = $options | Sort-Object Cost | Select-Object -First 1
+                $alternative = $options | Where-Object { $_.Name -ne $best.Name } | Sort-Object Cost | Select-Object -First 1
+                
+                $result.Recommendation = "Migrate to $($best.Name) (sparse usage)"
                 $result.RecommendedTier = "GP_S_Gen5_0.5-1"
                 $result.RecommendedCapacity = 0.5
-                $result.Recommended_Cost_EUR_Monthly = Get-EstimatedServerlessCost -VCores 0.5 -IdlePercent $result.Idle_Percent
+                $result.Recommended_Cost_EUR_Monthly = $best.Cost
+                
+                if ($alternative) {
+                    $result.Alternative_Recommendation = "$($alternative.Name) (€$($alternative.Cost))"
+                    $result.Alternative_Cost_EUR_Monthly = $alternative.Cost
+                }
+                
                 $result.Priority = 'High'
+                
+                if ($result.Scheduled_Pause_Feasibility) {
+                    $result.Flags = "Scheduled pause feasibility: $($result.Scheduled_Pause_Feasibility)"
+                }
             } else {
                 $result.Status = 'REVIEW'
                 $result.Recommendation = "FLAG: Decommission review (sparse usage but connections prevent serverless)"
