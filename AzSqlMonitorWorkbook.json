@@ -1,0 +1,732 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "00000000-0001-0000-0000-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "Subscription",
+            "label": "Subscription",
+            "type": 6,
+            "isRequired": true,
+            "typeSettings": {
+              "additionalResourceOptions": [],
+              "includeAll": false
+            }
+          },
+          {
+            "id": "00000000-0001-0000-0000-000000000002",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time Range",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 86400000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 259200000 },
+                { "durationMs": 604800000 }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "00000000-0001-0000-0000-000000000003",
+            "version": "KqlParameterItem/1.0",
+            "name": "SQLDBResources",
+            "label": "SQL Databases",
+            "type": 5,
+            "isRequired": false,
+            "multiSelect": true,
+            "query": "Resources\n| where type =~ 'microsoft.sql/servers/databases'\n| where name != 'master'\n| project id",
+            "crossComponentResources": ["{Subscription}"],
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources",
+            "value": ["value::all"],
+            "typeSettings": {
+              "additionalResourceOptions": ["value::all"],
+              "showDefault": false
+            }
+          },
+          {
+            "id": "00000000-0001-0000-0000-000000000004",
+            "version": "KqlParameterItem/1.0",
+            "name": "MIResources",
+            "label": "Managed Instances",
+            "type": 5,
+            "isRequired": false,
+            "multiSelect": true,
+            "query": "Resources\n| where type =~ 'microsoft.sql/managedinstances'\n| project id",
+            "crossComponentResources": ["{Subscription}"],
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources",
+            "value": ["value::all"],
+            "typeSettings": {
+              "additionalResourceOptions": ["value::all"],
+              "showDefault": false
+            }
+          },
+          {
+            "id": "00000000-0001-0000-0000-000000000005",
+            "version": "KqlParameterItem/1.0",
+            "name": "SQLVMResources",
+            "label": "SQL VMs (Compute)",
+            "type": 5,
+            "isRequired": false,
+            "multiSelect": true,
+            "query": "Resources\n| where type =~ 'microsoft.sqlvirtualmachine/sqlvirtualmachines'\n| project id = tostring(properties.virtualMachineResourceId)",
+            "crossComponentResources": ["{Subscription}"],
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources",
+            "value": ["value::all"],
+            "typeSettings": {
+              "additionalResourceOptions": ["value::all"],
+              "showDefault": false
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "# 🗄️ Azure SQL Monitoring Dashboard\n**Metrics-only · Free tier · No Log Analytics required**\n\n---"
+      },
+      "name": "title"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Resources\n| where type in~ ('microsoft.sql/servers/databases', 'microsoft.sql/managedinstances', 'microsoft.sqlvirtualmachine/sqlvirtualmachines')\n| where not (type =~ 'microsoft.sql/servers/databases' and name == 'master')\n| summarize Count = count() by ResourceType = case(\n    type =~ 'microsoft.sql/servers/databases', '🗄️ SQL Databases',\n    type =~ 'microsoft.sql/managedinstances', '🏢 Managed Instances',\n    '🖥️ SQL VMs'\n  )\n| order by ResourceType asc",
+        "size": 4,
+        "title": "Resource Inventory",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": ["{Subscription}"],
+        "visualization": "tiles",
+        "tileSettings": {
+          "showBorder": true,
+          "titleContent": { "columnMatch": "ResourceType", "formatter": 1 },
+          "leftContent": { "columnMatch": "Count", "formatter": 12, "formatOptions": { "palette": "blue" } }
+        }
+      },
+      "name": "inventory-tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "HealthResources\n| where type =~ 'microsoft.resourcehealth/availabilitystatuses'\n| where id has '/microsoft.sql/' or id has '/sqlvirtualmachines/'\n| extend ResourceName = tostring(split(id, '/')[-1])\n| extend State = tostring(properties.availabilityState)\n| extend Summary = tostring(properties.summary)\n| extend ResourceGroup = tostring(resourceGroup)\n| project ResourceName, ResourceGroup, State, Summary\n| order by State asc, ResourceName asc",
+        "size": 1,
+        "title": "🏥 Resource Health — All SQL Resources",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": ["{Subscription}"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "State",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Available", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "==", "thresholdValue": "Degraded", "representation": "warning", "text": "{0}{1}" },
+                  { "operator": "==", "thresholdValue": "Unavailable", "representation": "failed", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "unknown", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ],
+          "filter": true,
+          "sortBy": [{ "itemKey": "State", "sortOrder": 2 }]
+        }
+      },
+      "name": "resource-health"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Resources\n| where type in~ ('microsoft.sql/servers/databases', 'microsoft.sql/managedinstances', 'microsoft.sqlvirtualmachine/sqlvirtualmachines')\n| where not (type =~ 'microsoft.sql/servers/databases' and name == 'master')\n| extend ResourceType = case(\n    type =~ 'microsoft.sql/servers/databases', 'SQL Database',\n    type =~ 'microsoft.sql/managedinstances', 'Managed Instance',\n    'SQL VM'\n  )\n| extend Tier = coalesce(tostring(sku.tier), tostring(sku.name), '-')\n| extend Capacity = tostring(sku.capacity)\n| extend Location = tostring(location)\n| project ResourceType, name, resourceGroup, Location, Tier, Capacity, id\n| order by ResourceType asc, name asc",
+        "size": 1,
+        "title": "📋 All SQL Resources",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": ["{Subscription}"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "name",
+              "formatter": 13,
+              "formatOptions": { "linkTarget": "Resource", "linkIsContextBlade": true }
+            },
+            {
+              "columnMatch": "ResourceType",
+              "formatter": 1
+            }
+          ],
+          "filter": true,
+          "sortBy": [{ "itemKey": "ResourceType", "sortOrder": 1 }]
+        }
+      },
+      "name": "inventory-table"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## 🗄️ SQL Databases\n---"
+      },
+      "name": "sqldb-header"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 1,
+        "chartType": -1,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--storage_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "💾 Storage Used % — All Databases (sorted by MAX, red ≥ 90%, yellow ≥ 80%)",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "microsoft.sql/servers/databases--storage_percent Max",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  { "operator": ">=", "thresholdValue": "90", "representation": "redBright", "text": "{0:0.0}%" },
+                  { "operator": ">=", "thresholdValue": "80", "representation": "yellow", "text": "{0:0.0}%" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "green", "text": "{0:0.0}%" }
+                ]
+              }
+            }
+          ],
+          "rowLimit": 5000,
+          "filter": true,
+          "sortBy": [{ "itemKey": "microsoft.sql/servers/databases--storage_percent Max", "sortOrder": 2 }]
+        }
+      },
+      "name": "sqldb-storage-grid"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--storage_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "💾 Storage Used % — Trend"
+      },
+      "customWidth": "50",
+      "name": "sqldb-storage-trend"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--cpu_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "⚡ CPU % — MAX"
+      },
+      "customWidth": "50",
+      "name": "sqldb-cpu"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--dtu_consumption_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "📊 DTU Consumption % — MAX (DTU-tier DBs only; empty = vCore)"
+      },
+      "customWidth": "50",
+      "name": "sqldb-dtu"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--physical_data_read_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "📀 Data IO % — MAX"
+      },
+      "customWidth": "50",
+      "name": "sqldb-io"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--sessions_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "👥 Sessions % — MAX"
+      },
+      "customWidth": "50",
+      "name": "sqldb-sessions"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--workers_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "⚙️ Workers % — MAX"
+      },
+      "customWidth": "50",
+      "name": "sqldb-workers"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--connection_failed",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "🔴 Failed Connections — Total"
+      },
+      "customWidth": "50",
+      "name": "sqldb-failed-connections"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": ["{SQLDBResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--deadlock",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "🔒 Deadlocks — Total"
+      },
+      "customWidth": "50",
+      "name": "sqldb-deadlocks"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## 🏢 SQL Managed Instances\n---"
+      },
+      "name": "mi-header"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 1,
+        "chartType": -1,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": ["{MIResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--avg_cpu_percent",
+            "aggregation": 3,
+            "splitBy": null
+          },
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--storage_space_used_mb",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "🏢 Managed Instances — CPU % & Storage (MB) Overview",
+        "gridSettings": {
+          "rowLimit": 500,
+          "filter": true
+        }
+      },
+      "name": "mi-overview-grid"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": ["{MIResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--avg_cpu_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "⚡ CPU % — MAX"
+      },
+      "customWidth": "50",
+      "name": "mi-cpu"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": ["{MIResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--storage_space_used_mb",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "💾 Storage Used MB — MAX"
+      },
+      "customWidth": "50",
+      "name": "mi-storage"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": ["{MIResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--io_requests",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "📀 IO Requests — Total"
+      },
+      "customWidth": "50",
+      "name": "mi-io-requests"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": ["{MIResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--io_bytes_read",
+            "aggregation": 7,
+            "splitBy": null
+          },
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--io_bytes_written",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "💽 IO Bytes Read / Written — Total"
+      },
+      "customWidth": "50",
+      "name": "mi-io-bytes"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": ["{MIResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--connection_failed",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "🔴 Failed Connections — Total"
+      },
+      "customWidth": "50",
+      "name": "mi-failed-connections"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## 🖥️ SQL Virtual Machines\n> ⚠️ *Metrics are from the underlying Compute VM. For SQL-level disk space, the **Azure Monitor Agent** (AMA) must be installed on the VM.*\n\n---"
+      },
+      "name": "sqlvm-header"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachines",
+        "metricScope": 0,
+        "resourceIds": ["{SQLVMResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Percentage CPU",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "⚡ CPU % — MAX"
+      },
+      "customWidth": "50",
+      "name": "sqlvm-cpu"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachines",
+        "metricScope": 0,
+        "resourceIds": ["{SQLVMResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Available Memory Bytes",
+            "aggregation": 2,
+            "splitBy": null
+          }
+        ],
+        "title": "🧠 Available Memory Bytes — AVG (requires AMA)"
+      },
+      "customWidth": "50",
+      "name": "sqlvm-memory"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachines",
+        "metricScope": 0,
+        "resourceIds": ["{SQLVMResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Disk Read Bytes",
+            "aggregation": 7,
+            "splitBy": null
+          },
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Disk Write Bytes",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "💽 Disk I/O — Total Bytes (Read + Write)"
+      },
+      "customWidth": "50",
+      "name": "sqlvm-disk"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachines",
+        "metricScope": 0,
+        "resourceIds": ["{SQLVMResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Disk Read Operations/Sec",
+            "aggregation": 3,
+            "splitBy": null
+          },
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Disk Write Operations/Sec",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "📀 Disk IOPS — MAX"
+      },
+      "customWidth": "50",
+      "name": "sqlvm-iops"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachines",
+        "metricScope": 0,
+        "resourceIds": ["{SQLVMResources}"],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Network In Total",
+            "aggregation": 7,
+            "splitBy": null
+          },
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Network Out Total",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "🌐 Network In/Out — Total Bytes"
+      },
+      "customWidth": "50",
+      "name": "sqlvm-network"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n*Dashboard generated for Azure SQL monitoring — metrics-only, no Log Analytics required. All data uses Azure Platform Metrics (free). Resource Health uses Azure Resource Graph (free).*"
+      },
+      "name": "footer"
+    }
+  ],
+  "fallbackResourceIds": ["Azure Monitor"],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
