@@ -419,16 +419,85 @@
     {
       "type": 1,
       "content": {
-        "json": "---\n## \ud83d\uddc4\ufe0f SQL Databases \u2014 Top 10 Most Urgent\n---"
+        "json": "---\n## \ud83d\uddc4\ufe0f SQL Databases\n---"
       },
       "name": "sqldb-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "\nResources\n| where type =~ 'microsoft.sql/servers/databases'\n| where name != 'master'\n| join kind=leftouter (\n    ResourceContainers\n    | where type == 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName = name\n  ) on subscriptionId\n| extend\n    Server        = tostring(split(id, '/')[8]),\n    Tier          = tostring(sku.tier),\n    Capacity      = tostring(sku.capacity),\n    AllocatedGB   = round(todouble(properties.maxSizeBytes) / 1073741824, 1),\n    Edition       = tostring(sku.name),\n    Status        = tostring(properties.status)\n| project\n    ['Database']     = name,\n    SubscriptionName,\n    Server,\n    ['Resource Group'] = resourceGroup,\n    Tier,\n    Edition,\n    Capacity,\n    ['Allocated GB'] = AllocatedGB,\n    Status,\n    id\n| order by ['Allocated GB'] desc\n",
+        "size": 1,
+        "title": "\ud83d\udccb All Databases \u2014 sorted by allocated size (click name \u2192 Metrics blade)",
+        "noDataMessage": "No data found.",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "{Subscription}"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Database",
+              "formatter": 13,
+              "formatOptions": {
+                "linkTarget": "Resource",
+                "linkIsContextBlade": true
+              }
+            },
+            {
+              "columnMatch": "Status",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  {
+                    "operator": "==",
+                    "thresholdValue": "Online",
+                    "representation": "success",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": "==",
+                    "thresholdValue": "Paused",
+                    "representation": "unknown",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "failed",
+                    "text": "{0}"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "id",
+              "formatter": 5
+            }
+          ],
+          "filter": true
+        }
+      },
+      "customWidth": "100",
+      "name": "sqldb-inv-grid"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "> \ud83d\udcc8 Charts below show **all selected databases** as individual lines. Red line = 90% threshold, yellow = 80%. Hover a line to identify the database. **Click any database name in the table above** to open its Metrics blade in the portal.\n"
+      },
+      "name": "sqldb-charts-note"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/servers/databases",
         "metricScope": 0,
         "resourceIds": [
@@ -443,57 +512,36 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udcbe Top 10 \u2014 Storage Used % (highest first)",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*storage_percent.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "80",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--storage_percent Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udcbe Storage Used %",
+        "chartSettings": {
+          "seriesVisibility": [],
+          "xSettings": {},
+          "ySettings": {}
+        },
+        "thresholds": [
+          {
+            "operator": ">=",
+            "thresholdValue": 90,
+            "borderColor": "red",
+            "backgroundColor": "rgba(255,0,0,0.05)"
+          },
+          {
+            "operator": ">=",
+            "thresholdValue": 80,
+            "borderColor": "yellow",
+            "backgroundColor": "rgba(255,255,0,0.05)"
+          }
+        ]
       },
-      "customWidth": "100",
-      "name": "sqldb-storage-grid"
+      "customWidth": "50",
+      "name": "sqldb-storage-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/servers/databases",
         "metricScope": 0,
         "resourceIds": [
@@ -508,57 +556,36 @@
             "splitBy": null
           }
         ],
-        "title": "\u26a1 Top 10 \u2014 CPU % MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*cpu_percent.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "70",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--cpu_percent Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\u26a1 CPU %",
+        "chartSettings": {
+          "seriesVisibility": [],
+          "xSettings": {},
+          "ySettings": {}
+        },
+        "thresholds": [
+          {
+            "operator": ">=",
+            "thresholdValue": 90,
+            "borderColor": "red",
+            "backgroundColor": "rgba(255,0,0,0.05)"
+          },
+          {
+            "operator": ">=",
+            "thresholdValue": 80,
+            "borderColor": "yellow",
+            "backgroundColor": "rgba(255,255,0,0.05)"
+          }
+        ]
       },
       "customWidth": "50",
-      "name": "sqldb-cpu-grid"
+      "name": "sqldb-cpu-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/servers/databases",
         "metricScope": 0,
         "resourceIds": [
@@ -573,57 +600,36 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udcca Top 10 \u2014 DTU % MAX (DTU-tier only)",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*dtu_consumption_percent.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "70",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--dtu_consumption_percent Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udcca DTU % (DTU-tier only)",
+        "chartSettings": {
+          "seriesVisibility": [],
+          "xSettings": {},
+          "ySettings": {}
+        },
+        "thresholds": [
+          {
+            "operator": ">=",
+            "thresholdValue": 90,
+            "borderColor": "red",
+            "backgroundColor": "rgba(255,0,0,0.05)"
+          },
+          {
+            "operator": ">=",
+            "thresholdValue": 80,
+            "borderColor": "yellow",
+            "backgroundColor": "rgba(255,255,0,0.05)"
+          }
+        ]
       },
       "customWidth": "50",
-      "name": "sqldb-dtu-grid"
+      "name": "sqldb-dtu-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/servers/databases",
         "metricScope": 0,
         "resourceIds": [
@@ -638,122 +644,36 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udc65 Top 10 \u2014 Sessions % MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*sessions_percent.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "70",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--sessions_percent Max",
-              "sortOrder": 2
-            }
-          ]
-        }
-      },
-      "customWidth": "50",
-      "name": "sqldb-sessions-grid"
-    },
-    {
-      "type": 10,
-      "content": {
-        "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
-        "resourceType": "microsoft.sql/servers/databases",
-        "metricScope": 0,
-        "resourceIds": [
-          "{SQLDBResources}"
-        ],
-        "timeContextFromParameter": "TimeRange",
-        "metrics": [
+        "title": "\ud83d\udc65 Sessions %",
+        "chartSettings": {
+          "seriesVisibility": [],
+          "xSettings": {},
+          "ySettings": {}
+        },
+        "thresholds": [
           {
-            "namespace": "microsoft.sql/servers/databases",
-            "metric": "microsoft.sql/servers/databases--workers_percent",
-            "aggregation": 3,
-            "splitBy": null
+            "operator": ">=",
+            "thresholdValue": 90,
+            "borderColor": "red",
+            "backgroundColor": "rgba(255,0,0,0.05)"
+          },
+          {
+            "operator": ">=",
+            "thresholdValue": 80,
+            "borderColor": "yellow",
+            "backgroundColor": "rgba(255,255,0,0.05)"
           }
-        ],
-        "title": "\u2699\ufe0f Top 10 \u2014 Workers % MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*workers_percent.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "70",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--workers_percent Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        ]
       },
       "customWidth": "50",
-      "name": "sqldb-workers-grid"
+      "name": "sqldb-sessions-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/servers/databases",
         "metricScope": 0,
         "resourceIds": [
@@ -768,51 +688,17 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udd34 Top 10 \u2014 Failed Connections (Total)",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*connection_failed.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">",
-                    "thresholdValue": "0",
-                    "representation": "redBright",
-                    "text": "{0}"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0}"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--connection_failed Total",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udd34 Failed Connections"
       },
       "customWidth": "50",
-      "name": "sqldb-failed-connections"
+      "name": "sqldb-failed-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/servers/databases",
         "metricScope": 0,
         "resourceIds": [
@@ -827,58 +713,80 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udd12 Top 10 \u2014 Deadlocks (Total)",
+        "title": "\ud83d\udd12 Deadlocks"
+      },
+      "customWidth": "50",
+      "name": "sqldb-deadlock-chart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## \ud83c\udfe2 Managed Instances\n---"
+      },
+      "name": "mi-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "\nResources\n| where type =~ 'microsoft.sql/managedinstances'\n| join kind=leftouter (\n    ResourceContainers\n    | where type == 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName = name\n  ) on subscriptionId\n| extend\n    vCores       = tostring(sku.capacity),\n    Tier         = tostring(sku.tier),\n    StorageGB    = round(todouble(properties.storageSizeInGB), 0),\n    State        = tostring(properties.state),\n    LicenseType  = tostring(properties.licenseType)\n| project\n    ['Managed Instance'] = name,\n    SubscriptionName,\n    ['Resource Group']   = resourceGroup,\n    Tier, vCores,\n    ['Storage GB']       = StorageGB,\n    LicenseType, State,\n    id\n| order by ['Storage GB'] desc\n",
+        "size": 1,
+        "title": "\ud83d\udccb All Managed Instances \u2014 sorted by allocated storage",
+        "noDataMessage": "No data found.",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "{Subscription}"
+        ],
+        "visualization": "table",
         "gridSettings": {
           "formatters": [
             {
-              "columnMatch": ".*deadlock.*",
-              "treatAsNumber": true,
+              "columnMatch": "Managed Instance",
+              "formatter": 13,
+              "formatOptions": {
+                "linkTarget": "Resource",
+                "linkIsContextBlade": true
+              }
+            },
+            {
+              "columnMatch": "State",
               "formatter": 18,
               "formatOptions": {
-                "thresholdsOptions": "colors",
+                "thresholdsOptions": "icons",
                 "thresholdsGrid": [
                   {
-                    "operator": ">",
-                    "thresholdValue": "0",
-                    "representation": "redBright",
+                    "operator": "==",
+                    "thresholdValue": "Ready",
+                    "representation": "success",
                     "text": "{0}"
                   },
                   {
                     "operator": "Default",
                     "thresholdValue": null,
-                    "representation": "green",
+                    "representation": "failed",
                     "text": "{0}"
                   }
                 ]
               }
+            },
+            {
+              "columnMatch": "id",
+              "formatter": 5
             }
           ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/servers/databases--deadlock Total",
-              "sortOrder": 2
-            }
-          ]
+          "filter": true
         }
       },
-      "customWidth": "50",
-      "name": "sqldb-deadlocks"
-    },
-    {
-      "type": 1,
-      "content": {
-        "json": "---\n## \ud83c\udfe2 SQL Managed Instances \u2014 Top 10 Most Urgent\n---"
-      },
-      "name": "mi-header"
+      "customWidth": "100",
+      "name": "mi-inv-grid"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/managedinstances",
         "metricScope": 0,
         "resourceIds": [
@@ -893,57 +801,36 @@
             "splitBy": null
           }
         ],
-        "title": "\u26a1 Top 10 \u2014 CPU % MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*avg_cpu_percent.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "70",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/managedinstances--avg_cpu_percent Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\u26a1 CPU %",
+        "chartSettings": {
+          "seriesVisibility": [],
+          "xSettings": {},
+          "ySettings": {}
+        },
+        "thresholds": [
+          {
+            "operator": ">=",
+            "thresholdValue": 90,
+            "borderColor": "red",
+            "backgroundColor": "rgba(255,0,0,0.05)"
+          },
+          {
+            "operator": ">=",
+            "thresholdValue": 80,
+            "borderColor": "yellow",
+            "backgroundColor": "rgba(255,255,0,0.05)"
+          }
+        ]
       },
       "customWidth": "50",
-      "name": "mi-cpu-grid"
+      "name": "mi-cpu-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/managedinstances",
         "metricScope": 0,
         "resourceIds": [
@@ -958,45 +845,17 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udcbe Top 10 \u2014 Storage Used MB MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*storage_space_used_mb.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "blue",
-                    "text": "{0:0.0f} MB"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/managedinstances--storage_space_used_mb Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udcbe Storage Used MB"
       },
       "customWidth": "50",
-      "name": "mi-storage-grid"
+      "name": "mi-storage-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/managedinstances",
         "metricScope": 0,
         "resourceIds": [
@@ -1011,51 +870,17 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udd34 Top 10 \u2014 Failed Connections (Total)",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*connection_failed.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">",
-                    "thresholdValue": "0",
-                    "representation": "redBright",
-                    "text": "{0}"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0}"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/managedinstances--connection_failed Total",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udd34 Failed Connections"
       },
       "customWidth": "50",
-      "name": "mi-failed-connections"
+      "name": "mi-failed-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.sql/managedinstances",
         "metricScope": 0,
         "resourceIds": [
@@ -1070,52 +895,59 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udcc0 Top 10 \u2014 IO Requests (Total)",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*io_requests.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "blue",
-                    "text": "{0:0.0f}"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.sql/managedinstances--io_requests Total",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udcc0 IO Requests"
       },
       "customWidth": "50",
-      "name": "mi-io-requests"
+      "name": "mi-io-chart"
     },
     {
       "type": 1,
       "content": {
-        "json": "---\n## \ud83d\udda5\ufe0f SQL Virtual Machines \u2014 Top 10 Most Urgent\n> \u26a0\ufe0f *Metrics are VM-level. SQL-specific disk space requires Azure Monitor Agent (AMA).*\n\n---"
+        "json": "---\n## \ud83d\udda5\ufe0f SQL Virtual Machines\n> \u26a0\ufe0f Metrics are VM-level. SQL-specific disk space requires Azure Monitor Agent (AMA).\n\n---"
       },
       "name": "sqlvm-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "\nResources\n| where type =~ 'microsoft.sqlvirtualmachine/sqlvirtualmachines'\n| join kind=leftouter (\n    ResourceContainers\n    | where type == 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName = name\n  ) on subscriptionId\n| extend\n    VMId         = tostring(properties.virtualMachineResourceId),\n    SQLEdition   = tostring(properties.sqlManagement),\n    LicenseType  = tostring(properties.sqlServerLicenseType)\n| project\n    ['SQL VM']         = name,\n    SubscriptionName,\n    ['Resource Group'] = resourceGroup,\n    SQLEdition,\n    LicenseType,\n    id = VMId\n| order by SubscriptionName asc, ['SQL VM'] asc\n",
+        "size": 1,
+        "title": "\ud83d\udccb All SQL VMs",
+        "noDataMessage": "No data found.",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "{Subscription}"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "SQL VM",
+              "formatter": 13,
+              "formatOptions": {
+                "linkTarget": "Resource",
+                "linkIsContextBlade": true
+              }
+            },
+            {
+              "columnMatch": "id",
+              "formatter": 5
+            }
+          ],
+          "filter": true
+        }
+      },
+      "customWidth": "100",
+      "name": "sqlvm-inv-grid"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.compute/virtualmachines",
         "metricScope": 0,
         "resourceIds": [
@@ -1130,57 +962,36 @@
             "splitBy": null
           }
         ],
-        "title": "\u26a1 Top 10 \u2014 CPU % MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*Percentage CPU.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "90",
-                    "representation": "redBright",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": ">=",
-                    "thresholdValue": "70",
-                    "representation": "yellow",
-                    "text": "{0:0.1f}%"
-                  },
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "green",
-                    "text": "{0:0.1f}%"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.compute/virtualmachines--Percentage CPU Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\u26a1 CPU %",
+        "chartSettings": {
+          "seriesVisibility": [],
+          "xSettings": {},
+          "ySettings": {}
+        },
+        "thresholds": [
+          {
+            "operator": ">=",
+            "thresholdValue": 90,
+            "borderColor": "red",
+            "backgroundColor": "rgba(255,0,0,0.05)"
+          },
+          {
+            "operator": ">=",
+            "thresholdValue": 80,
+            "borderColor": "yellow",
+            "backgroundColor": "rgba(255,255,0,0.05)"
+          }
+        ]
       },
       "customWidth": "50",
-      "name": "sqlvm-cpu-grid"
+      "name": "sqlvm-cpu-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.compute/virtualmachines",
         "metricScope": 0,
         "resourceIds": [
@@ -1195,45 +1006,17 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83e\udde0 Top 10 \u2014 Available Memory Bytes AVG (lowest = most pressure)",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*Available Memory Bytes.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "blue",
-                    "text": "{0:0.0f}"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.compute/virtualmachines--Available Memory Bytes Average",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83e\udde0 Available Memory Bytes"
       },
       "customWidth": "50",
-      "name": "sqlvm-memory-grid"
+      "name": "sqlvm-memory-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.compute/virtualmachines",
         "metricScope": 0,
         "resourceIds": [
@@ -1248,45 +1031,17 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udcc0 Top 10 \u2014 Disk Read IOPS MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*Disk Read Operations/Sec.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "blue",
-                    "text": "{0:0.0f}"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.compute/virtualmachines--Disk Read Operations/Sec Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udcc0 Disk Read IOPS"
       },
       "customWidth": "50",
-      "name": "sqlvm-disk-grid"
+      "name": "sqlvm-diskread-chart"
     },
     {
       "type": 10,
       "content": {
         "version": "MetricsItem/2.0",
-        "size": 1,
-        "chartType": -1,
+        "size": 0,
+        "chartType": 2,
         "resourceType": "microsoft.compute/virtualmachines",
         "metricScope": 0,
         "resourceIds": [
@@ -1301,38 +1056,41 @@
             "splitBy": null
           }
         ],
-        "title": "\ud83d\udcbd Top 10 \u2014 Disk Write IOPS MAX",
-        "gridSettings": {
-          "formatters": [
-            {
-              "columnMatch": ".*Disk Write Operations/Sec.*",
-              "treatAsNumber": true,
-              "formatter": 18,
-              "formatOptions": {
-                "thresholdsOptions": "colors",
-                "thresholdsGrid": [
-                  {
-                    "operator": "Default",
-                    "thresholdValue": null,
-                    "representation": "blue",
-                    "text": "{0:0.0f}"
-                  }
-                ]
-              }
-            }
-          ],
-          "rowLimit": 10,
-          "filter": true,
-          "sortBy": [
-            {
-              "itemKey": "microsoft.compute/virtualmachines--Disk Write Operations/Sec Max",
-              "sortOrder": 2
-            }
-          ]
-        }
+        "title": "\ud83d\udcbd Disk Write IOPS"
       },
       "customWidth": "50",
-      "name": "sqlvm-iops-grid"
+      "name": "sqlvm-diskwrite-chart"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachines",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLVMResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Network In Total",
+            "aggregation": 7,
+            "splitBy": null
+          },
+          {
+            "namespace": "microsoft.compute/virtualmachines",
+            "metric": "microsoft.compute/virtualmachines--Network Out Total",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83c\udf10 Network In/Out Bytes"
+      },
+      "customWidth": "50",
+      "name": "sqlvm-net-chart"
     },
     {
       "type": 1,
