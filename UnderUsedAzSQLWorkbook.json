@@ -1,0 +1,726 @@
+{
+  "version": "Notebook/1.0",
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "p-sub",
+            "version": "KqlParameterItem/1.0",
+            "name": "Subscription",
+            "label": "Subscriptions",
+            "type": 6,
+            "isRequired": true,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "typeSettings": {
+              "additionalResourceOptions": [
+                "value::all"
+              ],
+              "includeAll": true,
+              "showDefault": false
+            },
+            "defaultValue": "value::all"
+          },
+          {
+            "id": "p-time",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time Range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 604800000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                },
+                {
+                  "durationMs": 7776000000
+                }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "p-sqldb",
+            "version": "KqlParameterItem/1.0",
+            "name": "SQLDBResources",
+            "label": "SQL Databases",
+            "type": 5,
+            "isRequired": false,
+            "multiSelect": true,
+            "query": "Resources\n| where type =~ 'microsoft.sql/servers/databases'\n| where name != 'master'\n| project id",
+            "crossComponentResources": [
+              "{Subscription}"
+            ],
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources",
+            "value": [
+              "value::all"
+            ],
+            "typeSettings": {
+              "additionalResourceOptions": [
+                "value::all"
+              ],
+              "showDefault": false
+            }
+          },
+          {
+            "id": "p-mi",
+            "version": "KqlParameterItem/1.0",
+            "name": "MIResources",
+            "label": "Managed Instances",
+            "type": 5,
+            "isRequired": false,
+            "multiSelect": true,
+            "query": "Resources\n| where type =~ 'microsoft.sql/managedinstances'\n| project id",
+            "crossComponentResources": [
+              "{Subscription}"
+            ],
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources",
+            "value": [
+              "value::all"
+            ],
+            "typeSettings": {
+              "additionalResourceOptions": [
+                "value::all"
+              ],
+              "showDefault": false
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "# \ud83d\udca4 Azure SQL \u2014 Underused Resource Finder\n**Metrics-only \u00b7 Free tier \u00b7 No Log Analytics required**\n\n> Use a **7\u201330 day** time range for meaningful underuse detection. Single-day views hide weekly usage patterns.\n\n---"
+      },
+      "name": "title"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## \u23f8\ufe0f Serverless / Paused Databases\nThese databases are **auto-paused** by Azure \u2014 definitively idle.\n"
+      },
+      "name": "paused-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "\nResources\n| where type =~ 'microsoft.sql/servers/databases'\n| where name != 'master'\n| where tostring(properties.currentServiceObjectiveName) =~ 'DataWarehouse'\n    or tostring(properties.status) =~ 'Paused'\n    or tostring(properties.currentServiceObjectiveName) contains 'Serverless'\n| join kind=leftouter (\n    ResourceContainers | where type == 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName = name\n  ) on subscriptionId\n| extend\n    Status      = tostring(properties.status),\n    Tier        = tostring(sku.tier),\n    AllocatedGB = round(todouble(properties.maxSizeBytes) / 1073741824, 1)\n| project\n    ['Database']       = name,\n    SubscriptionName,\n    ['Resource Group'] = resourceGroup,\n    Tier, Status,\n    ['Allocated GB']   = AllocatedGB,\n    id\n| order by Status asc, ['Allocated GB'] desc\n",
+        "size": 1,
+        "title": "\u23f8\ufe0f Paused / Serverless Databases",
+        "noDataMessage": "\u2705 No paused or serverless databases found.",
+        "noDataMessageStyle": 3,
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "{Subscription}"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Database",
+              "formatter": 13,
+              "formatOptions": {
+                "linkTarget": "Resource",
+                "linkIsContextBlade": true
+              }
+            },
+            {
+              "columnMatch": "Status",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  {
+                    "operator": "==",
+                    "thresholdValue": "Paused",
+                    "representation": "unknown",
+                    "text": "\u23f8\ufe0f Paused"
+                  },
+                  {
+                    "operator": "==",
+                    "thresholdValue": "Online",
+                    "representation": "success",
+                    "text": "\u2705 Online"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "failed",
+                    "text": "{0}"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "Allocated GB",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "100",
+                    "representation": "redBright",
+                    "text": "{0} GB"
+                  },
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "32",
+                    "representation": "yellow",
+                    "text": "{0} GB"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "blue",
+                    "text": "{0} GB"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "id",
+              "formatter": 5
+            }
+          ],
+          "filter": true
+        }
+      },
+      "customWidth": "100",
+      "name": "paused-grid"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## \ud83d\udcca All Databases \u2014 Sorted by Allocated Size\nLargest allocated databases first. Cross-reference with the metric charts below to identify those with high allocation but low actual usage.\n"
+      },
+      "name": "inv-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "\nResources\n| where type =~ 'microsoft.sql/servers/databases'\n| where name != 'master'\n| join kind=leftouter (\n    ResourceContainers | where type == 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName = name\n  ) on subscriptionId\n| extend\n    Tier        = tostring(sku.tier),\n    Edition     = tostring(sku.name),\n    Capacity    = toint(sku.capacity),\n    AllocatedGB = round(todouble(properties.maxSizeBytes) / 1073741824, 1),\n    Status      = tostring(properties.status),\n    LicenseType = tostring(properties.licenseType)\n| extend\n    EstimatedTierCost = case(\n        Tier =~ 'Premium',  '\ud83d\udcb8 Premium \u2014 high cost',\n        Tier =~ 'BusinessCritical', '\ud83d\udcb8 Business Critical \u2014 high cost',\n        Tier =~ 'GeneralPurpose',   '\u26a0\ufe0f General Purpose',\n        Tier =~ 'Standard',         '\u2705 Standard',\n        Tier =~ 'Basic',            '\u2705 Basic',\n        '\u2753 Unknown'\n    )\n| project\n    ['Database']       = name,\n    SubscriptionName,\n    ['Resource Group'] = resourceGroup,\n    Tier,\n    Edition,\n    ['vCores / DTU']   = tostring(Capacity),\n    ['Allocated GB']   = AllocatedGB,\n    ['Tier Cost']      = EstimatedTierCost,\n    Status,\n    id\n| order by ['Allocated GB'] desc\n",
+        "size": 1,
+        "title": "\ud83d\udccb All Databases \u2014 Largest Allocated First (click name \u2192 Metrics blade)",
+        "noDataMessage": "No results.",
+        "noDataMessageStyle": 3,
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "{Subscription}"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Database",
+              "formatter": 13,
+              "formatOptions": {
+                "linkTarget": "Resource",
+                "linkIsContextBlade": true
+              }
+            },
+            {
+              "columnMatch": "Allocated GB",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "500",
+                    "representation": "redBright",
+                    "text": "{0} GB"
+                  },
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "100",
+                    "representation": "yellow",
+                    "text": "{0} GB"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "blue",
+                    "text": "{0} GB"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "Tier Cost",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": "contains",
+                    "thresholdValue": "\ud83d\udcb8",
+                    "representation": "redBright",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": "contains",
+                    "thresholdValue": "\u26a0\ufe0f",
+                    "representation": "yellow",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "green",
+                    "text": "{0}"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "id",
+              "formatter": 5
+            }
+          ],
+          "filter": true
+        }
+      },
+      "customWidth": "100",
+      "name": "inv-grid"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## \ud83d\udcc8 Usage Metrics \u2014 Underuse Signals\n> Lines consistently **below the green threshold** over the selected period are candidates for downsizing or removal.\n> **Click any line** in a chart to open that database's full Metrics blade.\n"
+      },
+      "name": "metrics-header"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLDBResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--cpu_percent",
+            "aggregation": 4,
+            "splitBy": null
+          }
+        ],
+        "title": "\u26a1 Avg CPU % \u2014 green line = 10% (underuse threshold)",
+        "thresholds": [
+          {
+            "operator": "<=",
+            "thresholdValue": 10,
+            "borderColor": "green",
+            "backgroundColor": "rgba(0,180,0,0.04)"
+          }
+        ]
+      },
+      "customWidth": "50",
+      "name": "db-cpu-avg"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLDBResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--dtu_consumption_percent",
+            "aggregation": 4,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udcca Avg DTU % \u2014 green line = 10%",
+        "thresholds": [
+          {
+            "operator": "<=",
+            "thresholdValue": 10,
+            "borderColor": "green",
+            "backgroundColor": "rgba(0,180,0,0.04)"
+          }
+        ]
+      },
+      "customWidth": "50",
+      "name": "db-dtu-avg"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLDBResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--connection_successful",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udd0c Successful Connections \u2014 flat/zero = idle"
+      },
+      "customWidth": "50",
+      "name": "db-connections"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLDBResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--sessions_percent",
+            "aggregation": 4,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udc65 Avg Sessions %",
+        "thresholds": [
+          {
+            "operator": "<=",
+            "thresholdValue": 5,
+            "borderColor": "green",
+            "backgroundColor": "rgba(0,180,0,0.04)"
+          }
+        ]
+      },
+      "customWidth": "50",
+      "name": "db-sessions-avg"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLDBResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--storage_percent",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udcbe Storage Used % \u2014 low % on large DB = waste",
+        "thresholds": [
+          {
+            "operator": "<=",
+            "thresholdValue": 20,
+            "borderColor": "green",
+            "backgroundColor": "rgba(0,180,0,0.04)"
+          }
+        ]
+      },
+      "customWidth": "50",
+      "name": "db-storage-pct"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/servers/databases",
+        "metricScope": 0,
+        "resourceIds": [
+          "{SQLDBResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/servers/databases",
+            "metric": "microsoft.sql/servers/databases--workers_percent",
+            "aggregation": 4,
+            "splitBy": null
+          }
+        ],
+        "title": "\u2699\ufe0f Avg Workers %",
+        "thresholds": [
+          {
+            "operator": "<=",
+            "thresholdValue": 5,
+            "borderColor": "green",
+            "backgroundColor": "rgba(0,180,0,0.04)"
+          }
+        ]
+      },
+      "customWidth": "50",
+      "name": "db-workers-avg"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n## \ud83c\udfe2 Managed Instances \u2014 Underuse Signals\n> MIs are expensive even when idle \u2014 a single GP/4vCore MI costs ~\u20ac450/month minimum.\n"
+      },
+      "name": "mi-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "\nResources\n| where type =~ 'microsoft.sql/managedinstances'\n| join kind=leftouter (\n    ResourceContainers | where type == 'microsoft.resources/subscriptions'\n    | project subscriptionId, SubscriptionName = name\n  ) on subscriptionId\n| extend\n    vCores    = toint(sku.capacity),\n    Tier      = tostring(sku.tier),\n    StorageGB = toint(properties.storageSizeInGB),\n    State     = tostring(properties.state),\n    License   = tostring(properties.licenseType)\n| project\n    ['Managed Instance'] = name,\n    SubscriptionName,\n    ['Resource Group']   = resourceGroup,\n    Tier,\n    vCores,\n    ['Storage GB']       = StorageGB,\n    License,\n    State,\n    id\n| order by vCores desc, ['Storage GB'] desc\n",
+        "size": 1,
+        "title": "\ud83d\udccb All Managed Instances \u2014 sorted by vCores (highest cost first)",
+        "noDataMessage": "No results.",
+        "noDataMessageStyle": 3,
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [
+          "{Subscription}"
+        ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Managed Instance",
+              "formatter": 13,
+              "formatOptions": {
+                "linkTarget": "Resource",
+                "linkIsContextBlade": true
+              }
+            },
+            {
+              "columnMatch": "vCores",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "16",
+                    "representation": "redBright",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "8",
+                    "representation": "yellow",
+                    "text": "{0}"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "blue",
+                    "text": "{0}"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "Storage GB",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "2048",
+                    "representation": "redBright",
+                    "text": "{0} GB"
+                  },
+                  {
+                    "operator": ">=",
+                    "thresholdValue": "512",
+                    "representation": "yellow",
+                    "text": "{0} GB"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "blue",
+                    "text": "{0} GB"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "id",
+              "formatter": 5
+            }
+          ],
+          "filter": true
+        }
+      },
+      "customWidth": "100",
+      "name": "mi-inv-grid"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": [
+          "{MIResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--avg_cpu_percent",
+            "aggregation": 4,
+            "splitBy": null
+          }
+        ],
+        "title": "\u26a1 MI Avg CPU % \u2014 green line = 10%",
+        "thresholds": [
+          {
+            "operator": "<=",
+            "thresholdValue": 10,
+            "borderColor": "green",
+            "backgroundColor": "rgba(0,180,0,0.04)"
+          }
+        ]
+      },
+      "customWidth": "50",
+      "name": "mi-cpu-avg"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": [
+          "{MIResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--storage_space_used_mb",
+            "aggregation": 3,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udcbe MI Storage Used MB"
+      },
+      "customWidth": "50",
+      "name": "mi-storage-used"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": [
+          "{MIResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--connection_successful",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udd0c MI Successful Connections \u2014 zero = idle"
+      },
+      "customWidth": "50",
+      "name": "mi-connections"
+    },
+    {
+      "type": 10,
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.sql/managedinstances",
+        "metricScope": 0,
+        "resourceIds": [
+          "{MIResources}"
+        ],
+        "timeContextFromParameter": "TimeRange",
+        "metrics": [
+          {
+            "namespace": "microsoft.sql/managedinstances",
+            "metric": "microsoft.sql/managedinstances--io_requests",
+            "aggregation": 7,
+            "splitBy": null
+          }
+        ],
+        "title": "\ud83d\udcc0 MI IO Requests \u2014 zero = no activity"
+      },
+      "customWidth": "50",
+      "name": "mi-io"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n### \ud83d\udd0d Next steps when a candidate is identified\n1. **Click the database name** \u2192 Metrics blade \u2192 extend time range to 30\u201390 days\n2. **Check Query Store** in the portal (SQL DB blade \u2192 Query Performance Insight) for actual query activity\n3. **Check backup history** \u2014 last restore point date indicates last write activity\n4. For definitive proof of idle: connect and run `SELECT * FROM sys.dm_exec_sessions` or query `sys.dm_db_log_stats` for last log write\n\n*Metrics-only dashboard \u2014 no Log Analytics required. All data from Azure Platform Metrics and Azure Resource Graph (free tier).*"
+      },
+      "name": "footer"
+    }
+  ]
+}
