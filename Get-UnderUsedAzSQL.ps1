@@ -129,7 +129,7 @@ function Get-MetricSeries {
 function Get-PctBelow {
     param([object[]]$Series, [double]$Threshold)
     if ($Series.Count -eq 0) { return $null }
-    $below = ($Series | Where-Object { $_.Value -lt $Threshold }).Count
+    $below = @($Series | Where-Object { $_.Value -lt $Threshold }).Count
     return [math]::Round(($below / $Series.Count) * 100, 1)
 }
 
@@ -137,7 +137,7 @@ function Get-PctBelow {
 function Get-PctZero {
     param([object[]]$Series)
     if ($Series.Count -eq 0) { return $null }
-    $zero = ($Series | Where-Object { $_.Value -eq 0 }).Count
+    $zero = @($Series | Where-Object { $_.Value -eq 0 }).Count
     return [math]::Round(($zero / $Series.Count) * 100, 1)
 }
 
