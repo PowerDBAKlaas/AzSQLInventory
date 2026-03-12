@@ -100,22 +100,19 @@ function Get-MetricSeries {
         [string]   $MetricName,
         [datetime] $StartTime,
         [datetime] $EndTime,
-        [string]   $Aggregation = 'Average',  # Average | Total | Maximum
-        [string]   $SubscriptionId
+        [string]   $Aggregation = 'Average'   # Average | Total | Maximum
+        # NOTE: context must already be set to the correct subscription by the caller
     )
 
     try {
-        # Set context to correct subscription for this resource
-        $null = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
-
         $metric = Get-AzMetric `
-            -ResourceId   $ResourceId `
-            -MetricName   $MetricName `
-            -StartTime    $StartTime `
-            -EndTime      $EndTime `
-            -TimeGrain    '01:00:00' `
+            -ResourceId      $ResourceId `
+            -MetricName      $MetricName `
+            -StartTime       $StartTime `
+            -EndTime         $EndTime `
+            -TimeGrain       '01:00:00' `
             -AggregationType $Aggregation `
-            -ErrorAction  Stop
+            -ErrorAction     Stop
 
         $series = $metric.Data |
             Where-Object { $null -ne $_.$Aggregation } |
@@ -209,109 +206,129 @@ foreach ($s in $subNames) { $subLookup[$s.SubscriptionId] = $s.SubscriptionName 
 #region ── Collect metrics ──────────────────────────────────────────────────────
 
 Write-Step "Collecting metrics for $($databases.Count) databases (this takes a while)..."
+Write-Host "  Grouped by subscription to minimise context switches."
 
-$results = [System.Collections.Generic.List[PSObject]]::new()
-$i       = 0
+$results      = [System.Collections.Generic.List[PSObject]]::new()
+$totalDbs     = $databases.Count
+$processedDbs = 0
 
-foreach ($db in $databases) {
-    $i++
-    $pct  = [math]::Round(($i / $databases.Count) * 100)
-    Write-Progress -Activity 'Collecting Azure Monitor metrics' `
-                   -Status   "$i / $($databases.Count) — $($db.name)" `
-                   -PercentComplete $pct
+# Group databases by subscription — Set-AzContext called once per sub, not once per metric
+$dbsBySubscription = $databases | Group-Object -Property subscriptionId
 
-    $subId = $db.subscriptionId
-    $rid   = $db.id
+foreach ($subGroup in $dbsBySubscription) {
+    $subId   = $subGroup.Name
+    $subName = if ($subLookup.ContainsKey($subId)) { $subLookup[$subId] } else { $subId }
+    $subDbs  = $subGroup.Group
 
-    # ── CPU (always available)
-    $cpuSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'cpu_percent' `
-                     -StartTime $StartTime -EndTime $EndTime `
-                     -Aggregation 'Average' -SubscriptionId $subId
-    $cpuPctBelow = Get-PctBelow -Series $cpuSeries -Threshold $CpuThresholdPct
+    Write-Step "Subscription: $subName ($($subDbs.Count) databases)" 'Yellow'
 
-    # ── DTU (DTU-tier only; null = vCore tier)
-    $dtuPctBelow = $null
-    if ($db.IsDtuTier) {
-        $dtuSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'dtu_consumption_percent' `
-                         -StartTime $StartTime -EndTime $EndTime `
-                         -Aggregation 'Average' -SubscriptionId $subId
-        $dtuPctBelow = Get-PctBelow -Series $dtuSeries -Threshold $DtuThresholdPct
+    # Set context once for the entire subscription
+    try {
+        $null = Set-AzContext -SubscriptionId $subId -ErrorAction Stop
+        Write-Host "  Context set." -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Warning "  Could not set context for $subId — skipping. Error: $_"
+        continue
     }
 
-    # ── Sessions %
-    $sessSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'sessions_percent' `
-                      -StartTime $StartTime -EndTime $EndTime `
-                      -Aggregation 'Average' -SubscriptionId $subId
-    $sessPctBelow = Get-PctBelow -Series $sessSeries -Threshold $SessionsThresholdPct
+    foreach ($db in $subDbs) {
+        $processedDbs++
+        $pct = [math]::Round(($processedDbs / $totalDbs) * 100)
+        Write-Host "    [$processedDbs/$totalDbs] $($db.name)" -ForegroundColor DarkGray
 
-    # ── Successful connections (Total per hour; zero = idle that hour)
-    $connSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'connection_successful' `
-                      -StartTime $StartTime -EndTime $EndTime `
-                      -Aggregation 'Total' -SubscriptionId $subId
-    $connPctZero = Get-PctZero -Series $connSeries
+        $rid = $db.id
 
-    # ── Storage % (Maximum over period — single value for allocation waste)
-    $storSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'storage_percent' `
-                      -StartTime $StartTime -EndTime $EndTime `
-                      -Aggregation 'Maximum' -SubscriptionId $subId
-    $storMax    = if ($storSeries.Count -gt 0) {
-                      [math]::Round(($storSeries | Measure-Object Value -Maximum).Maximum, 1)
-                  } else { $null }
-    # Storage underuse: low % on large DB. Score = inverse (100 - storMax) weighted by size
-    $storScore  = if ($null -ne $storMax -and $db.AllocatedGB -ge 10) {
-                      [math]::Round([math]::Max(0, 100 - $storMax), 1)
-                  } else { $null }
+        # ── CPU
+        Write-Host "      cpu_percent..." -NoNewline -ForegroundColor DarkGray
+        $cpuSeries   = @(Get-MetricSeries -ResourceId $rid -MetricName 'cpu_percent' `
+                             -StartTime $StartTime -EndTime $EndTime -Aggregation 'Average')
+        $cpuPctBelow = Get-PctBelow -Series $cpuSeries -Threshold $CpuThresholdPct
+        Write-Host " $($cpuSeries.Count) pts" -ForegroundColor DarkGray
 
-    # ── Composite underuse score (0–100, higher = more underused)
-    # Weights: CPU 30%, Sessions 25%, Connections 25%, DTU/Storage 10% each
-    # If DTU not available, redistribute weight to CPU
-    $scores  = [System.Collections.Generic.List[double]]::new()
-    $weights = [System.Collections.Generic.List[double]]::new()
-
-    if ($null -ne $cpuPctBelow)  { $scores.Add($cpuPctBelow);  $weights.Add(30) }
-    if ($null -ne $sessPctBelow) { $scores.Add($sessPctBelow); $weights.Add(25) }
-    if ($null -ne $connPctZero)  { $scores.Add($connPctZero);  $weights.Add(25) }
-    if ($null -ne $dtuPctBelow)  { $scores.Add($dtuPctBelow);  $weights.Add(10) }
-    if ($null -ne $storScore)    { $scores.Add($storScore);    $weights.Add(10) }
-
-    $compositeScore = $null
-    if ($scores.Count -gt 0) {
-        $totalWeight    = ($weights | Measure-Object -Sum).Sum
-        $weightedSum    = 0
-        for ($j = 0; $j -lt $scores.Count; $j++) {
-            $weightedSum += $scores[$j] * $weights[$j]
+        # ── DTU (DTU-tier only)
+        $dtuPctBelow = $null
+        if ($db.IsDtuTier) {
+            Write-Host "      dtu_consumption_percent..." -NoNewline -ForegroundColor DarkGray
+            $dtuSeries   = @(Get-MetricSeries -ResourceId $rid -MetricName 'dtu_consumption_percent' `
+                                 -StartTime $StartTime -EndTime $EndTime -Aggregation 'Average')
+            $dtuPctBelow = Get-PctBelow -Series $dtuSeries -Threshold $DtuThresholdPct
+            Write-Host " $($dtuSeries.Count) pts" -ForegroundColor DarkGray
         }
-        $compositeScore = [math]::Round($weightedSum / $totalWeight, 1)
+
+        # ── Sessions %
+        Write-Host "      sessions_percent..." -NoNewline -ForegroundColor DarkGray
+        $sessSeries   = @(Get-MetricSeries -ResourceId $rid -MetricName 'sessions_percent' `
+                              -StartTime $StartTime -EndTime $EndTime -Aggregation 'Average')
+        $sessPctBelow = Get-PctBelow -Series $sessSeries -Threshold $SessionsThresholdPct
+        Write-Host " $($sessSeries.Count) pts" -ForegroundColor DarkGray
+
+        # ── Successful connections
+        Write-Host "      connection_successful..." -NoNewline -ForegroundColor DarkGray
+        $connSeries  = @(Get-MetricSeries -ResourceId $rid -MetricName 'connection_successful' `
+                             -StartTime $StartTime -EndTime $EndTime -Aggregation 'Total')
+        $connPctZero = Get-PctZero -Series $connSeries
+        Write-Host " $($connSeries.Count) pts" -ForegroundColor DarkGray
+
+        # ── Storage %
+        Write-Host "      storage_percent..." -NoNewline -ForegroundColor DarkGray
+        $storSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'storage_percent' `
+                            -StartTime $StartTime -EndTime $EndTime -Aggregation 'Maximum')
+        $storMax    = if ($storSeries.Count -gt 0) {
+                          [math]::Round(($storSeries | Measure-Object Value -Maximum).Maximum, 1)
+                      } else { $null }
+        $storScore  = if ($null -ne $storMax -and $db.AllocatedGB -ge 10) {
+                          [math]::Round([math]::Max(0, 100 - $storMax), 1)
+                      } else { $null }
+        Write-Host " $($storSeries.Count) pts" -ForegroundColor DarkGray
+
+        # ── Composite underuse score (0-100, higher = more underused)
+        $scores  = [System.Collections.Generic.List[double]]::new()
+        $weights = [System.Collections.Generic.List[double]]::new()
+
+        if ($null -ne $cpuPctBelow)  { $scores.Add($cpuPctBelow);  $weights.Add(30) }
+        if ($null -ne $sessPctBelow) { $scores.Add($sessPctBelow); $weights.Add(25) }
+        if ($null -ne $connPctZero)  { $scores.Add($connPctZero);  $weights.Add(25) }
+        if ($null -ne $dtuPctBelow)  { $scores.Add($dtuPctBelow);  $weights.Add(10) }
+        if ($null -ne $storScore)    { $scores.Add($storScore);    $weights.Add(10) }
+
+        $compositeScore = $null
+        if ($scores.Count -gt 0) {
+            $totalWeight = ($weights | Measure-Object -Sum).Sum
+            $weightedSum = 0
+            for ($j = 0; $j -lt $scores.Count; $j++) { $weightedSum += $scores[$j] * $weights[$j] }
+            $compositeScore = [math]::Round($weightedSum / $totalWeight, 1)
+        }
+
+        $results.Add([PSCustomObject]@{
+            SubscriptionName           = $subName
+            SubscriptionId             = $subId
+            ResourceGroup              = $db.resourceGroup
+            ServerName                 = $db.ServerName
+            DatabaseName               = $db.name
+            Location                   = $db.location
+            Tier                       = $db.Tier
+            Edition                    = $db.Edition
+            'vCores/DTU'               = $db.Capacity
+            'AllocatedGB'              = $db.AllocatedGB
+            Status                     = $db.Status
+            'CPU_PctHoursBelow10'      = $cpuPctBelow
+            'DTU_PctHoursBelow10'      = $dtuPctBelow
+            'Sessions_PctHoursBelow5'  = $sessPctBelow
+            'Connections_PctHoursIdle' = $connPctZero
+            'StorageUsed_MaxPct'       = $storMax
+            'StorageWasteScore'        = $storScore
+            'DataPoints_CPU'           = $cpuSeries.Count
+            'UnderuseScore'            = $compositeScore
+            ResourceId                 = $rid
+        })
+
+        # Throttle: Azure Monitor allows 600 requests/min per subscription
+        Start-Sleep -Milliseconds 200
     }
-
-    $results.Add([PSCustomObject]@{
-        SubscriptionName    = $subLookup[$subId] ?? $subId
-        SubscriptionId      = $subId
-        ResourceGroup       = $db.resourceGroup
-        ServerName          = $db.ServerName
-        DatabaseName        = $db.name
-        Location            = $db.location
-        Tier                = $db.Tier
-        Edition             = $db.Edition
-        'vCores/DTU'        = $db.Capacity
-        'AllocatedGB'       = $db.AllocatedGB
-        Status              = $db.Status
-        'CPU_PctHoursBelow10'      = $cpuPctBelow
-        'DTU_PctHoursBelow10'      = $dtuPctBelow
-        'Sessions_PctHoursBelow5'  = $sessPctBelow
-        'Connections_PctHoursIdle' = $connPctZero
-        'StorageUsed_MaxPct'       = $storMax
-        'StorageWasteScore'        = $storScore
-        'DataPoints_CPU'           = $cpuSeries.Count
-        'UnderuseScore'            = $compositeScore
-        ResourceId                 = $rid
-    })
-
-    # Throttle to avoid Azure Monitor rate limits (600 requests/min per subscription)
-    Start-Sleep -Milliseconds 200
 }
 
-Write-Progress -Activity 'Collecting Azure Monitor metrics' -Completed
+Write-Host ''  # newline after inline progress
 
 #endregion
 
