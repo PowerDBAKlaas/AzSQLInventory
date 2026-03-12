@@ -224,7 +224,7 @@ foreach ($db in $databases) {
     $rid   = $db.id
 
     # ── CPU (always available)
-    $cpuSeries = Get-MetricSeries -ResourceId $rid -MetricName 'cpu_percent' `
+    $cpuSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'cpu_percent' `
                      -StartTime $StartTime -EndTime $EndTime `
                      -Aggregation 'Average' -SubscriptionId $subId
     $cpuPctBelow = Get-PctBelow -Series $cpuSeries -Threshold $CpuThresholdPct
@@ -232,26 +232,26 @@ foreach ($db in $databases) {
     # ── DTU (DTU-tier only; null = vCore tier)
     $dtuPctBelow = $null
     if ($db.IsDtuTier) {
-        $dtuSeries = Get-MetricSeries -ResourceId $rid -MetricName 'dtu_consumption_percent' `
+        $dtuSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'dtu_consumption_percent' `
                          -StartTime $StartTime -EndTime $EndTime `
                          -Aggregation 'Average' -SubscriptionId $subId
         $dtuPctBelow = Get-PctBelow -Series $dtuSeries -Threshold $DtuThresholdPct
     }
 
     # ── Sessions %
-    $sessSeries = Get-MetricSeries -ResourceId $rid -MetricName 'sessions_percent' `
+    $sessSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'sessions_percent' `
                       -StartTime $StartTime -EndTime $EndTime `
                       -Aggregation 'Average' -SubscriptionId $subId
     $sessPctBelow = Get-PctBelow -Series $sessSeries -Threshold $SessionsThresholdPct
 
     # ── Successful connections (Total per hour; zero = idle that hour)
-    $connSeries = Get-MetricSeries -ResourceId $rid -MetricName 'connection_successful' `
+    $connSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'connection_successful' `
                       -StartTime $StartTime -EndTime $EndTime `
                       -Aggregation 'Total' -SubscriptionId $subId
     $connPctZero = Get-PctZero -Series $connSeries
 
     # ── Storage % (Maximum over period — single value for allocation waste)
-    $storSeries = Get-MetricSeries -ResourceId $rid -MetricName 'storage_percent' `
+    $storSeries = @(Get-MetricSeries -ResourceId $rid -MetricName 'storage_percent' `
                       -StartTime $StartTime -EndTime $EndTime `
                       -Aggregation 'Maximum' -SubscriptionId $subId
     $storMax    = if ($storSeries.Count -gt 0) {
