@@ -1,6 +1,3 @@
-#Requires -Modules Az.Accounts, Az.ResourceGraph
-#Requires -Version 7.0
-
 <#
 .SYNOPSIS
     Reports wasted space in Azure SQL Databases and Managed Instance databases with shrink recommendations and cost estimates.
@@ -200,16 +197,36 @@ GO
 
 Write-Step 'Checking prerequisites...'
 
-# Az connection
+# PowerShell version
+Write-Info "PowerShell version: $($PSVersionTable.PSVersion)"
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "PowerShell 7+ required. Current: $($PSVersionTable.PSVersion). Download: https://aka.ms/powershell"
+}
+Write-Ok "PowerShell $($PSVersionTable.PSVersion)"
+
+# Az.Accounts
+Write-Info 'Loading Az.Accounts...'
+try   { Import-Module Az.Accounts -ErrorAction Stop }
+catch { throw "Az.Accounts not found. Run: Install-Module Az.Accounts -Scope CurrentUser" }
+Write-Ok 'Az.Accounts loaded.'
+
+# Az.ResourceGraph
+Write-Info 'Loading Az.ResourceGraph...'
+try   { Import-Module Az.ResourceGraph -ErrorAction Stop }
+catch { throw "Az.ResourceGraph not found. Run: Install-Module Az.ResourceGraph -Scope CurrentUser" }
+Write-Ok 'Az.ResourceGraph loaded.'
+
+# Azure context
 Write-Info 'Checking Azure context...'
 try   { $ctx = Get-AzContext -ErrorAction Stop }
 catch { throw 'Not connected to Azure. Run Connect-AzAccount first.' }
-if (-not $ctx) { throw 'No Azure context found. Run Connect-AzAccount first.' }
-Write-Ok "Azure context: $($ctx.Account)"
+if (-not $ctx -or -not $ctx.Account) { throw 'No Azure context found. Run Connect-AzAccount first.' }
+Write-Ok "Azure context: $($ctx.Account) / $($ctx.Tenant.Id)"
 
 # Invoke-Sqlcmd
+Write-Info 'Checking Invoke-Sqlcmd...'
 try   { $null = Get-Command Invoke-Sqlcmd -ErrorAction Stop }
-catch { throw "Invoke-Sqlcmd not found. Install SqlServer module: Install-Module SqlServer -Scope CurrentUser" }
+catch { throw "Invoke-Sqlcmd not found. Run: Install-Module SqlServer -Scope CurrentUser" }
 Write-Ok 'Invoke-Sqlcmd available.'
 
 $OutputPath = [string](Resolve-Path $OutputPath)
