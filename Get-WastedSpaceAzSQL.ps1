@@ -189,7 +189,6 @@ GO
             TSQL        = $tsql
         }
     }
-}
 
 #endregion
 
