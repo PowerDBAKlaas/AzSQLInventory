@@ -74,6 +74,23 @@ function Write-Info  { param([string]$Msg) Write-Host "  $Msg" -ForegroundColor 
 function Write-Ok    { param([string]$Msg) Write-Host "  ✓ $Msg" -ForegroundColor Green }
 function Write-Warn  { param([string]$Msg) Write-Host "  ⚠ $Msg" -ForegroundColor Yellow }
 
+# Safely convert a possibly-null/DBNull/empty value to double
+function ConvertTo-SafeDouble {
+    param($Value, [double]$Default = 0)
+    if ($null -eq $Value -or $Value -is [System.DBNull] -or "$Value" -eq '') { return $Default }
+    try   { return [double]$Value }
+    catch { return $Default }
+}
+
+# Safely get .Sum from Measure-Object, returning 0 if null or empty collection
+function Get-SafeSum {
+    param([object[]]$Collection, [string]$Property)
+    $measured = @($Collection | Where-Object { $null -ne $_.$Property }) |
+        Measure-Object -Property $Property -Sum -ErrorAction SilentlyContinue
+    if ($null -eq $measured -or $null -eq $measured.Sum) { return 0 }
+    return $measured.Sum
+}
+
 function Invoke-ArgQuery {
     param([string]$Query, [string[]]$Subscriptions)
     $results   = [System.Collections.Generic.List[PSObject]]::new()
@@ -404,12 +421,12 @@ foreach ($serverGroup in $dbsByServer) {
         try {
             $fileRows     = @(Invoke-Sqlcmd @sqlParams -Query $fileSpaceQuery)
             $versionStore = @(Invoke-Sqlcmd @sqlParams -Query $versionStoreQuery)
-            $versionStoreMB = if ($versionStore.Count -gt 0) { [double]$versionStore[0].VersionStoreMB } else { 0 }
+            $versionStoreMB = if ($versionStore.Count -gt 0) { ConvertTo-SafeDouble $versionStore[0].VersionStoreMB } else { 0 }
 
             foreach ($file in $fileRows) {
-                $allocMB  = [math]::Round([double]$file.AllocatedMB, 2)
-                $usedMB   = [math]::Round([double]$file.UsedMB, 2)
-                $freeMB   = [math]::Round([double]$file.FreeMB, 2)
+                $allocMB  = [math]::Round((ConvertTo-SafeDouble $file.AllocatedMB), 2)
+                $usedMB   = [math]::Round((ConvertTo-SafeDouble $file.UsedMB), 2)
+                $freeMB   = [math]::Round((ConvertTo-SafeDouble $file.FreeMB), 2)
                 $wastePct = if ($allocMB -gt 0) { [math]::Round(($freeMB / $allocMB) * 100, 1) } else { 0 }
 
                 $freeGB   = [math]::Round($freeMB / 1024, 3)
@@ -535,8 +552,8 @@ $cleanRows   = @($allFileRows | Where-Object { $_.DataStatus -eq 'OK' -and $_.Re
 $noDataRows  = @($allFileRows | Where-Object { $_.DataStatus -ne 'OK' }) |
     Sort-Object -Property DataStatus, DatabaseName
 
-$totalWastedGB    = [math]::Round(($actionRows | Measure-Object FreeGB -Sum).Sum, 2)
-$totalMonthlyCost = [math]::Round(($actionRows | Measure-Object MonthlyWasteCost -Sum).Sum, 2)
+$totalWastedGB    = [math]::Round((Get-SafeSum -Collection $actionRows -Property FreeGB), 2)
+$totalMonthlyCost = [math]::Round((Get-SafeSum -Collection $actionRows -Property MonthlyWasteCost), 2)
 
 Write-Ok "$($actionRows.Count) files above waste thresholds."
 Write-Ok "$($cleanRows.Count) files OK (below thresholds)."
