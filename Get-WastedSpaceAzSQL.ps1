@@ -50,6 +50,8 @@ param (
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+Write-Host "Find-AzSqlSpaceWaste.ps1 starting..." -ForegroundColor Cyan
+
 #region ── Pricing table — West Europe, 2025-Q1 ──────────────────────────────
 # Source: https://azure.microsoft.com/en-us/pricing/details/azure-sql-database/
 # vCore tiers: per GB/month beyond included storage
@@ -83,6 +85,7 @@ function Invoke-ArgQuery {
         $params = @{ Query = $Query }
         if ($Subscriptions.Count -gt 0) { $params['Subscription'] = $Subscriptions }
         if ($skipToken)                  { $params['SkipToken']    = $skipToken }
+        Write-Host "    [ARG] Querying page..." -ForegroundColor DarkGray
         $page      = Search-AzGraph @params -First 1000
         $skipToken = $page.SkipToken
         foreach ($row in $page) { $results.Add($row) }
@@ -198,6 +201,7 @@ GO
 Write-Step 'Checking prerequisites...'
 
 # Az connection
+Write-Info 'Checking Azure context...'
 try   { $ctx = Get-AzContext -ErrorAction Stop }
 catch { throw 'Not connected to Azure. Run Connect-AzAccount first.' }
 if (-not $ctx) { throw 'No Azure context found. Run Connect-AzAccount first.' }
@@ -208,7 +212,7 @@ try   { $null = Get-Command Invoke-Sqlcmd -ErrorAction Stop }
 catch { throw "Invoke-Sqlcmd not found. Install SqlServer module: Install-Module SqlServer -Scope CurrentUser" }
 Write-Ok 'Invoke-Sqlcmd available.'
 
-$OutputPath = Resolve-Path $OutputPath
+$OutputPath = [string](Resolve-Path $OutputPath)
 Write-Ok "Output path: $OutputPath"
 
 #endregion
@@ -264,7 +268,9 @@ Resources
     MaxSizeBytes, Status
 '@
 
+Write-Info 'Querying SQL Databases via ARG...'
 $dbResults = Invoke-ArgQuery -Query $argQueryDb -Subscriptions $SubscriptionIds
+Write-Info 'Querying Managed Instance databases via ARG...'
 $miResults = Invoke-ArgQuery -Query $argQueryMi -Subscriptions $SubscriptionIds
 $databases = @($dbResults) + @($miResults)
 
@@ -285,6 +291,7 @@ ResourceContainers
 | project subscriptionId, SubscriptionName = name
 '@
 $subLookup = @{}
+Write-Info 'Resolving subscription names...'
 foreach ($s in Invoke-ArgQuery -Query $subQuery -Subscriptions $SubscriptionIds) {
     $subLookup[$s.subscriptionId] = $s.SubscriptionName
 }
@@ -304,6 +311,7 @@ Write-Ok "Found $($databases.Count) online databases across $(@($databases.subsc
 Write-Step 'Acquiring Entra access token for Azure SQL Database...'
 
 try {
+    Write-Info 'Calling Get-AzAccessToken...'
     $tokenObj    = Get-AzAccessToken -ResourceUrl 'https://database.windows.net/' -ErrorAction Stop
     $accessToken = $tokenObj.Token
     Write-Ok "Token acquired (expires: $($tokenObj.ExpiresOn.ToString('HH:mm:ss')))"
