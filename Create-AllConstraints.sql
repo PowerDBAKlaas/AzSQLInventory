@@ -1,4 +1,78 @@
 -- Run on source DB
+-- Generates Clustered Index + PK DDL for IntermediateDB (currently heaps)
+-- Order matters: clustered indexes first, then PKs
+
+SET NOCOUNT ON;
+DECLARE @sql nvarchar(max) = N'';
+
+-- ── 1. CLUSTERED INDEXES (not PK, not unique constraint) ──────────────────
+SELECT @sql +=
+    N'CREATE ' + CASE i.is_unique WHEN 1 THEN N'UNIQUE ' ELSE N'' END
+    + N'CLUSTERED INDEX ' + QUOTENAME(i.name)
+    + N' ON ' + QUOTENAME(SCHEMA_NAME(t.schema_id)) + N'.' + QUOTENAME(t.name)
+    + N' (' 
+    + STRING_AGG(
+        QUOTENAME(c.name) + CASE ic.is_descending_key WHEN 1 THEN N' DESC' ELSE N' ASC' END,
+        N', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
+    + N');' + CHAR(13)
+FROM sys.indexes i
+JOIN sys.tables t        ON i.object_id  = t.object_id
+JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns c        ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE i.type = 1
+  AND i.is_primary_key = 0
+  AND i.is_unique_constraint = 0
+  AND t.is_filetable = 0
+  AND ic.is_included_column = 0
+GROUP BY i.name, i.is_unique, t.schema_id, t.name
+ORDER BY t.name;
+
+-- ── 2. UNIQUE CONSTRAINTS (clustered) ────────────────────────────────────
+SELECT @sql +=
+    N'ALTER TABLE ' + QUOTENAME(SCHEMA_NAME(t.schema_id)) + N'.' + QUOTENAME(t.name)
+    + N' ADD CONSTRAINT ' + QUOTENAME(kc.name)
+    + N' UNIQUE CLUSTERED ('
+    + STRING_AGG(
+        QUOTENAME(c.name) + CASE ic.is_descending_key WHEN 1 THEN N' DESC' ELSE N' ASC' END,
+        N', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
+    + N');' + CHAR(13)
+FROM sys.key_constraints kc
+JOIN sys.tables t          ON kc.parent_object_id = t.object_id
+JOIN sys.indexes i         ON kc.parent_object_id = i.object_id AND kc.unique_index_id = i.index_id
+JOIN sys.index_columns ic  ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns c         ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE kc.type = N'UQ'
+  AND i.type = 1
+  AND t.is_filetable = 0
+  AND ic.is_included_column = 0
+GROUP BY kc.name, t.schema_id, t.name
+ORDER BY t.name;
+
+-- ── 3. PRIMARY KEYS (clustered or non-clustered) ─────────────────────────
+SELECT @sql +=
+    N'ALTER TABLE ' + QUOTENAME(SCHEMA_NAME(t.schema_id)) + N'.' + QUOTENAME(t.name)
+    + N' ADD CONSTRAINT ' + QUOTENAME(kc.name)
+    + N' PRIMARY KEY ' + CASE i.type WHEN 1 THEN N'CLUSTERED' ELSE N'NONCLUSTERED' END
+    + N' ('
+    + STRING_AGG(
+        QUOTENAME(c.name) + CASE ic.is_descending_key WHEN 1 THEN N' DESC' ELSE N' ASC' END,
+        N', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
+    + N');' + CHAR(13)
+FROM sys.key_constraints kc
+JOIN sys.tables t          ON kc.parent_object_id = t.object_id
+JOIN sys.indexes i         ON kc.parent_object_id = i.object_id AND kc.unique_index_id = i.index_id
+JOIN sys.index_columns ic  ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns c         ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE kc.type = N'PK'
+  AND t.is_filetable = 0
+  AND ic.is_included_column = 0
+GROUP BY kc.name, t.schema_id, t.name, i.type
+ORDER BY t.name;
+
+-- PRINT truncates at 8000 chars — use SELECT for large outputs
+SELECT @sql AS GeneratedDDL;
+
+-- Run on source DB
 -- Excludes FileTables; generates constraints to apply on IntermediateDB
 
 DECLARE @TargetDB sysname = N'IntermediateDB';
