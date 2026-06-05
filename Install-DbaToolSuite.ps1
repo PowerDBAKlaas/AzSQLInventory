@@ -149,6 +149,20 @@ function Get-InstalledProcDate {
     }
 }
 
+function Test-InstalledProc {
+    param([object]$Server, [string]$Database, [string]$ProcName)
+    $query = @"
+SELECT CASE WHEN OBJECT_ID(N'$ProcName') IS NULL THEN 0 ELSE 1 END AS ProcExists;
+"@
+    try {
+        $exists = Invoke-DbaQuery -SqlInstance $Server -Database $Database `
+                                  -Query $query -As SingleValue -EnableException
+        return ([int]$exists -eq 1)
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-SqlFile {
     <#
     Writes SQL content to a temp file then executes via Invoke-DbaQuery -File.
@@ -244,20 +258,20 @@ $tools = [ordered]@{
         InstallFn = {
             param([object]$Server, [string]$Database)
             $sql = $script:olaSql -replace 'USE \[master\]', "USE [$Database]"
-            # On PaaS, strip Agent job creation — sp_add_job requires sysadmin in msdb.
-            # Stored procedures deploy fine; schedule jobs manually via Agent UI or scripts.
-            $isPaas = $Server.DatabaseEngineEdition.ToString() -in
-                        @('SqlAzureManagedInstance', 'SqlDatabase')
-            if ($isPaas) {
-                # Find the first line that calls sp_add_job and truncate there
-                $lines      = $sql -split "`n"
-                $cutLine    = ($lines | Select-String 'sp_add_job' |
-                               Select-Object -First 1).LineNumber
-                if ($cutLine) {
-                    $sql = ($lines[0..($cutLine - 2)]) -join "`n"
+            try {
+                Invoke-SqlFile -Server $Server -Database $Database -Sql $sql
+            } catch {
+                # On MI/Azure SQL, SQL Agent job creation sections can fail while proc deploy still succeeds.
+                $message = $_.Exception.Message
+                $isPaas  = $Server.DatabaseEngineEdition.ToString() -in
+                           @('SqlAzureManagedInstance', 'SqlDatabase')
+                $jobError = $message -match 'sp_add_job|sp_add_jobstep|msdb|SQLServerAgent'
+                if ($isPaas -and $jobError) {
+                    Write-Warning "Ola job section skipped on PaaS: $message"
+                } else {
+                    throw
                 }
             }
-            Invoke-SqlFile -Server $Server -Database $Database -Sql $sql
         }
     }
 
@@ -311,11 +325,14 @@ function Install-ToolsOnServer {
     foreach ($toolName in $script:tools.Keys) {
         $tool          = $script:tools[$toolName]
         $latestDate    = $script:latestDates[$toolName]
+        $installedProc = Test-InstalledProc -Server   $Server `
+                                            -Database $DbName `
+                                            -ProcName $tool.RepProc
         $installedDate = Get-InstalledProcDate -Server   $Server `
                                                -Database $DbName `
                                                -ProcName $tool.RepProc
 
-        $notInstalled  = ($null -eq $installedDate)
+        $notInstalled  = -not $installedProc
         $outdated      = (
             $null -ne $latestDate -and
             $null -ne $installedDate -and
@@ -334,16 +351,25 @@ function Install-ToolsOnServer {
             $reason = "Outdated - installed: $installedStr, latest: $latestStr"
         } elseif ($latestUnknown -and -not $notInstalled) {
             # Installed but we cannot determine if it is current
-            $installedStr = $installedDate.ToString('yyyy-MM-dd')
+            $installedStr = if ($null -ne $installedDate) {
+                $installedDate.ToString('yyyy-MM-dd')
+            } else {
+                'unknown'
+            }
             Write-Status $instanceName $toolName 'SKIPPED' `
                 "Installed: $installedStr - latest date not parsed from download; use -Force to reinstall"
             continue
         } else {
             # Up to date
-            $installedStr = $installedDate.ToString('yyyy-MM-dd')
-            $latestStr    = $latestDate.ToString('yyyy-MM-dd')
-            Write-Status $instanceName $toolName 'OK' `
-                "Installed: $installedStr, Latest: $latestStr"
+            if ($null -ne $installedDate -and $null -ne $latestDate) {
+                $installedStr = $installedDate.ToString('yyyy-MM-dd')
+                $latestStr    = $latestDate.ToString('yyyy-MM-dd')
+                Write-Status $instanceName $toolName 'OK' `
+                    "Installed: $installedStr, Latest: $latestStr"
+            } else {
+                Write-Status $instanceName $toolName 'OK' `
+                    'Installed; date comparison not available'
+            }
             continue
         }
 
@@ -351,10 +377,16 @@ function Install-ToolsOnServer {
         try {
             & $tool.InstallFn $Server $DbName
             # Re-read to confirm
-            $newDate    = Get-InstalledProcDate -Server $Server -Database $DbName `
-                                                -ProcName $tool.RepProc
-            $confirmed  = if ($null -ne $newDate) {
-                "Confirmed: $($newDate.ToString('yyyy-MM-dd'))"
+            $newExists = Test-InstalledProc -Server   $Server `
+                                            -Database $DbName `
+                                            -ProcName $tool.RepProc
+            $newDate   = Get-InstalledProcDate -Server   $Server `
+                                               -Database $DbName `
+                                               -ProcName $tool.RepProc
+            $confirmed = if ($newExists -and $null -ne $newDate) {
+                "Confirmed: installed, header date $($newDate.ToString('yyyy-MM-dd'))"
+            } elseif ($newExists) {
+                'Confirmed: installed (header date not parseable)'
             } else {
                 'WARNING: proc not found after install - check for errors above'
             }
