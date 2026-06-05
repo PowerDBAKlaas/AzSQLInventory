@@ -42,6 +42,7 @@
     .\Install-DbaToolSuite.ps1 -VmServers $vmServers -MiServers $miServers
 #>
 
+[CmdletBinding()]
 param(
     [object[]]$VmServers      = @(),
     [object[]]$MiServers      = @(),
@@ -155,7 +156,9 @@ function Invoke-SqlFile {
     This avoids the GO-inside-string-literal problem with manual splitting.
     #>
     param([object]$Server, [string]$Database, [string]$Sql)
-    $tmpFile = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.sql'
+    # Use a random GUID-based name — GetTempFileName() creates a real .tmp file
+    # that would be orphaned if we only write to a .sql-renamed path.
+    $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) ("dba_$(New-Guid).sql")
     try {
         [System.IO.File]::WriteAllText($tmpFile, $Sql,
             [System.Text.Encoding]::UTF8)
@@ -305,9 +308,9 @@ function Install-ToolsOnServer {
         return
     }
 
-    foreach ($toolName in $tools.Keys) {
-        $tool          = $tools[$toolName]
-        $latestDate    = $latestDates[$toolName]
+    foreach ($toolName in $script:tools.Keys) {
+        $tool          = $script:tools[$toolName]
+        $latestDate    = $script:latestDates[$toolName]
         $installedDate = Get-InstalledProcDate -Server   $Server `
                                                -Database $DbName `
                                                -ProcName $tool.RepProc
