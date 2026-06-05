@@ -110,7 +110,7 @@ function Get-HeaderDate {
     $isoPattern = '(?<!\d)(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?!\d)'
     if ($header -match $isoPattern) {
         $candidate = "$($Matches[1])-$($Matches[2])-$($Matches[3])"
-        $parsed    = $null
+        [datetime]$parsed = [datetime]::MinValue
         if ([datetime]::TryParseExact(
                 $candidate, 'yyyy-MM-dd',
                 [System.Globalization.CultureInfo]::InvariantCulture,
@@ -122,7 +122,7 @@ function Get-HeaderDate {
 
     # Pattern 2: sp_WhoIsActive vXXXX.YYYYMMDD
     if ($Sql -match 'v\d{4}\.(\d{8})') {
-        $parsed = $null
+        [datetime]$parsed = [datetime]::MinValue
         if ([datetime]::TryParseExact(
                 $Matches[1], 'yyyyMMdd',
                 [System.Globalization.CultureInfo]::InvariantCulture,
