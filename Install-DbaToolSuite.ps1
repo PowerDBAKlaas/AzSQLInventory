@@ -6,12 +6,10 @@
 
 .DESCRIPTION
     All downloads happen on the CLIENT machine, then SQL is pushed to each target
-    via Invoke-DbaQuery. No outbound internet access required on SQL Server or MI.
+    via Invoke-DbaQuery / sqlcmd. No outbound internet required on the target.
 
-    Version comparison: the date is parsed from the downloaded SQL content itself
-    (which is already on the client), then compared to the date in the installed
-    procedure header. No GitHub API calls needed for version comparison — the
-    downloaded content IS the latest version.
+    Version comparison: the date is parsed from the downloaded SQL content and
+    compared to the date in the installed procedure header. No GitHub API calls.
 
     Installed in:
         SQL VM  : [DBA]
@@ -33,8 +31,7 @@
     Re-install even if the installed version is current.
 
 .PARAMETER GitHubToken
-    Optional GitHub PAT. Avoids the 60 req/h unauthenticated rate limit.
-    Only needed for the raw file downloads; not used for API calls.
+    Optional GitHub PAT to avoid unauthenticated rate limits on raw downloads.
 
 .EXAMPLE
     $miServers = @('mi01.xxx.database.windows.net') | ForEach-Object {
@@ -65,14 +62,14 @@ function Write-Status {
     param([string]$Instance, [string]$Tool, [string]$Status, [string]$Detail = '')
     $ts  = Get-Date -Format 'HH:mm:ss'
     $msg = "[$ts] $($Instance.PadRight(40)) | $($Tool.PadRight(20)) | $Status"
-    if ($Detail) { $msg += " — $Detail" }
+    if ($Detail) { $msg += " - $Detail" }
     Write-Host $msg
 }
 
 function Get-RawFile {
     param([string]$Url)
     $headers = @{}
-    if ($script:GitHubToken) { $headers.Authorization = "Bearer $script:GitHubToken" }
+    if ($script:GitHubToken) { $headers['Authorization'] = "Bearer $script:GitHubToken" }
     (Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -ErrorAction Stop).Content
 }
 
@@ -81,10 +78,9 @@ function Get-ZipExtracted {
     $tmpZip = [System.IO.Path]::GetTempFileName() + '.zip'
     $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) `
                         ([System.IO.Path]::GetRandomFileName())
-    $url    = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
+    $url     = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
     $headers = @{}
-    if ($script:GitHubToken) { $headers.Authorization = "Bearer $script:GitHubToken" }
-
+    if ($script:GitHubToken) { $headers['Authorization'] = "Bearer $script:GitHubToken" }
     Invoke-WebRequest -Uri $url -Headers $headers -OutFile $tmpZip `
                       -UseBasicParsing -ErrorAction Stop
     Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
@@ -94,30 +90,54 @@ function Get-ZipExtracted {
 
 function Get-HeaderDate {
     <#
-    Parses the first date-like string from a block of SQL text.
-    Handles:
-      YYYY-MM-DD  (Ola, FRK, DarlingData)
-      vXXXX.YYYYMMDD  (sp_WhoIsActive new scheme)
-    Returns $null if no date found.
+    Parses the version/release date from a SQL script header.
+
+    Patterns handled (in priority order):
+      1. YYYY-MM-DD  — explicit ISO date used by Ola, FRK, DarlingData
+         Requires surrounding non-digit context to avoid matching year-only strings.
+         Match must have valid month (01-12) and day (01-31).
+      2. vXXXX.YYYYMMDD — sp_WhoIsActive new versioning scheme
+
+    Returns [datetime] or $null.
     #>
     param([string]$Sql)
     if ([string]::IsNullOrWhiteSpace($Sql)) { return $null }
 
-    if ($Sql -match '(\d{4}-\d{2}-\d{2})') {
-        return [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd', $null)
+    # Pattern 1: strict ISO date — digit boundary prevents matching inside longer numbers
+    # Scans only the first 4000 chars (header area) to avoid false positives in SQL body
+    $header = if ($Sql.Length -gt 4000) { $Sql.Substring(0, 4000) } else { $Sql }
+    $isoPattern = '(?<!\d)(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?!\d)'
+    if ($header -match $isoPattern) {
+        $candidate = "$($Matches[1])-$($Matches[2])-$($Matches[3])"
+        $parsed    = $null
+        if ([datetime]::TryParseExact(
+                $candidate, 'yyyy-MM-dd',
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::None,
+                [ref]$parsed)) {
+            return $parsed
+        }
     }
+
+    # Pattern 2: sp_WhoIsActive vXXXX.YYYYMMDD
     if ($Sql -match 'v\d{4}\.(\d{8})') {
-        return [datetime]::ParseExact($Matches[1], 'yyyyMMdd', $null)
+        $parsed = $null
+        if ([datetime]::TryParseExact(
+                $Matches[1], 'yyyyMMdd',
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::None,
+                [ref]$parsed)) {
+            return $parsed
+        }
     }
+
     return $null
 }
 
 function Get-InstalledProcDate {
     param([object]$Server, [string]$Database, [string]$ProcName)
-    $query = @"
-SELECT OBJECT_DEFINITION(OBJECT_ID(N'$ProcName')) AS def
-WHERE  OBJECT_ID(N'$ProcName') IS NOT NULL;
-"@
+    $query = "SELECT OBJECT_DEFINITION(OBJECT_ID(N'$ProcName')) AS def
+              WHERE  OBJECT_ID(N'$ProcName') IS NOT NULL;"
     try {
         $def = Invoke-DbaQuery -SqlInstance $Server -Database $Database `
                                -Query $query -As SingleValue -EnableException
@@ -128,17 +148,21 @@ WHERE  OBJECT_ID(N'$ProcName') IS NOT NULL;
     }
 }
 
-function Invoke-SqlScript {
+function Invoke-SqlFile {
     <#
-    Splits on GO batch separators, executes each batch individually.
-    Invoke-DbaQuery does not handle GO natively.
+    Writes SQL content to a temp file then executes via Invoke-DbaQuery -File.
+    dbatools handles GO batch splitting correctly when using -File.
+    This avoids the GO-inside-string-literal problem with manual splitting.
     #>
     param([object]$Server, [string]$Database, [string]$Sql)
-    $batches = $Sql -split '(?m)^\s*GO\s*$' |
-               Where-Object { $_.Trim() -ne '' }
-    foreach ($batch in $batches) {
+    $tmpFile = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.sql'
+    try {
+        [System.IO.File]::WriteAllText($tmpFile, $Sql,
+            [System.Text.Encoding]::UTF8)
         Invoke-DbaQuery -SqlInstance $Server -Database $Database `
-                        -Query $batch -EnableException -Verbose:$false
+                        -File $tmpFile -EnableException -Verbose:$false
+    } finally {
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -148,54 +172,57 @@ function Invoke-SqlScript {
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Downloading tool sources from GitHub ..."
 
-# ── Ola Hallengren ────────────────────────────────────────────────────────────
+# Ola Hallengren
 $olaSql  = Get-RawFile `
     'https://raw.githubusercontent.com/olahallengren/sql-server-maintenance-solution/master/MaintenanceSolution.sql'
 $olaDate = Get-HeaderDate -Sql $olaSql
-Write-Host "  Ola date in download   : $($olaDate?.ToString('yyyy-MM-dd') ?? 'not found')"
+$olaDateStr = if ($olaDate) { $olaDate.ToString('yyyy-MM-dd') } else { 'not found' }
+Write-Host "  Ola date in download        : $olaDateStr"
 
-# ── sp_WhoIsActive ─────────────────────────────────────────────────────────────
-# Root = SQL 2022+; /2019 subfolder = SQL 2019 and earlier
+# sp_WhoIsActive — root = SQL 2022+; /2019 subfolder = SQL 2019 and earlier
 $wiaSql2022 = Get-RawFile `
     'https://raw.githubusercontent.com/amachanic/sp_whoisactive/master/sp_WhoIsActive.sql'
 $wiaSql2019 = Get-RawFile `
     'https://raw.githubusercontent.com/amachanic/sp_whoisactive/master/2019/sp_WhoIsActive.sql'
 $wiaDate    = Get-HeaderDate -Sql $wiaSql2022
-Write-Host "  sp_WhoIsActive date    : $($wiaDate?.ToString('yyyy-MM-dd') ?? 'not found')"
+$wiaDateStr = if ($wiaDate) { $wiaDate.ToString('yyyy-MM-dd') } else { 'not found' }
+Write-Host "  sp_WhoIsActive date         : $wiaDateStr"
 
-# ── First Responder Kit ────────────────────────────────────────────────────────
+# First Responder Kit
 $frkDir   = Get-ZipExtracted -Repo 'BrentOzarULTD/SQL-Server-First-Responder-Kit' -Branch 'main'
 $frkFiles = @(
     'sp_Blitz.sql', 'sp_BlitzCache.sql', 'sp_BlitzFirst.sql',
     'sp_BlitzIndex.sql', 'sp_BlitzAnalysis.sql', 'sp_BlitzQueryStore.sql'
 )
-$frkSqls = $frkFiles | ForEach-Object {
-    $f = Get-ChildItem $frkDir -Filter $_ -Recurse -ErrorAction SilentlyContinue |
-         Select-Object -First 1
-    if ($f) { Get-Content $f.FullName -Raw } else { $null }
-} | Where-Object { $_ }
-# Representative date from sp_Blitz.sql (first file)
-$frkDate = Get-HeaderDate -Sql $frkSqls[0]
-Write-Host "  FRK date in download   : $($frkDate?.ToString('yyyy-MM-dd') ?? 'not found')"
+$frkSqls = foreach ($f in $frkFiles) {
+    $found = Get-ChildItem $frkDir -Filter $f -Recurse -ErrorAction SilentlyContinue |
+             Select-Object -First 1
+    if ($found) { Get-Content $found.FullName -Raw }
+}
+$frkSqls  = @($frkSqls | Where-Object { $_ })
+$frkDate  = Get-HeaderDate -Sql $frkSqls[0]
+$frkDateStr = if ($frkDate) { $frkDate.ToString('yyyy-MM-dd') } else { 'not found' }
+Write-Host "  FRK date in download        : $frkDateStr"
 
-# ── DarlingData ────────────────────────────────────────────────────────────────
+# DarlingData
 $ddDir   = Get-ZipExtracted -Repo 'erikdarlingdata/DarlingData' -Branch 'main'
 $ddProcs = @(
     'sp_HumanEvents', 'sp_HumanEventsBlockViewer', 'sp_PressureDetector',
     'sp_QuickieStore', 'sp_LogHunter', 'sp_HealthParser',
     'sp_IndexCleanup', 'sp_PerfCheck'
 )
-$ddSqls = $ddProcs | ForEach-Object {
-    $f = Get-ChildItem $ddDir -Filter "$_.sql" -Recurse -ErrorAction SilentlyContinue |
-         Select-Object -First 1
-    if ($f) { Get-Content $f.FullName -Raw } else { $null }
-} | Where-Object { $_ }
-$ddDate = Get-HeaderDate -Sql $ddSqls[0]
-Write-Host "  DarlingData date       : $($ddDate?.ToString('yyyy-MM-dd') ?? 'not found')"
+$ddSqls = foreach ($p in $ddProcs) {
+    $found = Get-ChildItem $ddDir -Filter "$p.sql" -Recurse -ErrorAction SilentlyContinue |
+             Select-Object -First 1
+    if ($found) { Get-Content $found.FullName -Raw }
+}
+$ddSqls   = @($ddSqls | Where-Object { $_ })
+$ddDate   = Get-HeaderDate -Sql $ddSqls[0]
+$ddDateStr = if ($ddDate) { $ddDate.ToString('yyyy-MM-dd') } else { 'not found' }
+Write-Host "  DarlingData date            : $ddDateStr"
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Downloads complete."
 
-# Map tool names to their downloaded dates (from content, not API)
 $latestDates = @{
     Ola               = $olaDate
     FirstResponderKit = $frkDate
@@ -214,15 +241,20 @@ $tools = [ordered]@{
         InstallFn = {
             param([object]$Server, [string]$Database)
             $sql = $script:olaSql -replace 'USE \[master\]', "USE [$Database]"
-            # On PaaS, sp_add_job in msdb is unavailable without sysadmin.
-            # Deploy stored procedures only; Agent jobs must be created separately.
+            # On PaaS, strip Agent job creation — sp_add_job requires sysadmin in msdb.
+            # Stored procedures deploy fine; schedule jobs manually via Agent UI or scripts.
             $isPaas = $Server.DatabaseEngineEdition.ToString() -in
                         @('SqlAzureManagedInstance', 'SqlDatabase')
             if ($isPaas) {
-                # Strip everything from the first EXEC msdb.dbo.sp_add_job line onward
-                $sql = ($sql -split '(?m)^.*sp_add_job.*$')[0]
+                # Find the first line that calls sp_add_job and truncate there
+                $lines      = $sql -split "`n"
+                $cutLine    = ($lines | Select-String 'sp_add_job' |
+                               Select-Object -First 1).LineNumber
+                if ($cutLine) {
+                    $sql = ($lines[0..($cutLine - 2)]) -join "`n"
+                }
             }
-            Invoke-SqlScript -Server $Server -Database $Database -Sql $sql
+            Invoke-SqlFile -Server $Server -Database $Database -Sql $sql
         }
     }
 
@@ -231,7 +263,7 @@ $tools = [ordered]@{
         InstallFn = {
             param([object]$Server, [string]$Database)
             foreach ($sql in $script:frkSqls) {
-                try   { Invoke-SqlScript -Server $Server -Database $Database -Sql $sql }
+                try   { Invoke-SqlFile -Server $Server -Database $Database -Sql $sql }
                 catch { Write-Warning "FRK script error (non-fatal): $($_.Exception.Message)" }
             }
         }
@@ -242,7 +274,7 @@ $tools = [ordered]@{
         InstallFn = {
             param([object]$Server, [string]$Database)
             foreach ($sql in $script:ddSqls) {
-                try   { Invoke-SqlScript -Server $Server -Database $Database -Sql $sql }
+                try   { Invoke-SqlFile -Server $Server -Database $Database -Sql $sql }
                 catch { Write-Warning "DarlingData script error (non-fatal): $($_.Exception.Message)" }
             }
         }
@@ -252,10 +284,9 @@ $tools = [ordered]@{
         RepProc   = 'dbo.sp_WhoIsActive'
         InstallFn = {
             param([object]$Server, [string]$Database)
-            # SQL 2022+ uses root; SQL 2019 (VersionMajor 15) and earlier use /2019
             $sql = if ($Server.VersionMajor -le 15) { $script:wiaSql2019 }
                    else                              { $script:wiaSql2022 }
-            Invoke-SqlScript -Server $Server -Database $Database -Sql $sql
+            Invoke-SqlFile -Server $Server -Database $Database -Sql $sql
         }
     }
 }
@@ -270,58 +301,60 @@ function Install-ToolsOnServer {
     $instanceName = $Server.DomainInstanceName
 
     if (-not $Server.Databases[$DbName]) {
-        Write-Warning "[$instanceName] Database [$DbName] not found — skipping."
+        Write-Warning "[$instanceName] Database [$DbName] not found - skipping."
         return
     }
 
     foreach ($toolName in $tools.Keys) {
-        $tool        = $tools[$toolName]
-        $latestDate  = $latestDates[$toolName]
+        $tool          = $tools[$toolName]
+        $latestDate    = $latestDates[$toolName]
         $installedDate = Get-InstalledProcDate -Server   $Server `
                                                -Database $DbName `
                                                -ProcName $tool.RepProc
 
-        $notInstalled = ($null -eq $installedDate)
-
-        # If latest date could not be parsed from download, treat as unknown
-        # but still install when not present; warn when present.
-        $outdated = (
-            $latestDate -and
-            $installedDate -and
+        $notInstalled  = ($null -eq $installedDate)
+        $outdated      = (
+            $null -ne $latestDate -and
+            $null -ne $installedDate -and
             $installedDate.Date -lt $latestDate.Date
         )
+        $latestUnknown = ($null -eq $latestDate)
 
-        $unknownLatest = (-not $latestDate)
-
-        if (-not $notInstalled -and -not $outdated -and -not $Force -and -not $unknownLatest) {
-            Write-Status $instanceName $toolName 'OK' `
-                "Installed: $($installedDate.ToString('yyyy-MM-dd')), " +
-                "Latest: $($latestDate.ToString('yyyy-MM-dd'))"
-            continue
-        }
-
-        if (-not $notInstalled -and $unknownLatest -and -not $Force) {
+        # Determine action
+        if ($Force) {
+            $reason = 'Force reinstall'
+        } elseif ($notInstalled) {
+            $reason = 'Not installed'
+        } elseif ($outdated) {
+            $installedStr = $installedDate.ToString('yyyy-MM-dd')
+            $latestStr    = $latestDate.ToString('yyyy-MM-dd')
+            $reason = "Outdated - installed: $installedStr, latest: $latestStr"
+        } elseif ($latestUnknown -and -not $notInstalled) {
+            # Installed but we cannot determine if it is current
+            $installedStr = $installedDate.ToString('yyyy-MM-dd')
             Write-Status $instanceName $toolName 'SKIPPED' `
-                "Installed: $($installedDate.ToString('yyyy-MM-dd')) — " +
-                "could not parse latest version date from download; use -Force to reinstall"
+                "Installed: $installedStr - latest date not parsed from download; use -Force to reinstall"
+            continue
+        } else {
+            # Up to date
+            $installedStr = $installedDate.ToString('yyyy-MM-dd')
+            $latestStr    = $latestDate.ToString('yyyy-MM-dd')
+            Write-Status $instanceName $toolName 'OK' `
+                "Installed: $installedStr, Latest: $latestStr"
             continue
         }
-
-        $reason = if ($notInstalled) { 'Not installed' }
-                  elseif ($outdated) {
-                      "Outdated — installed: $($installedDate.ToString('yyyy-MM-dd')), " +
-                      "latest: $($latestDate.ToString('yyyy-MM-dd'))"
-                  } elseif ($unknownLatest) { 'Version unknown — forcing reinstall' }
-                  else                      { 'Force reinstall' }
 
         Write-Status $instanceName $toolName 'Installing' $reason
         try {
             & $tool.InstallFn $Server $DbName
-            # Re-read installed date to confirm
-            $newDate = Get-InstalledProcDate -Server $Server -Database $DbName `
-                                             -ProcName $tool.RepProc
-            $confirmed = if ($newDate) { "Now: $($newDate.ToString('yyyy-MM-dd'))" } `
-                         else          { 'WARNING: proc not found after install' }
+            # Re-read to confirm
+            $newDate    = Get-InstalledProcDate -Server $Server -Database $DbName `
+                                                -ProcName $tool.RepProc
+            $confirmed  = if ($null -ne $newDate) {
+                "Confirmed: $($newDate.ToString('yyyy-MM-dd'))"
+            } else {
+                'WARNING: proc not found after install - check for errors above'
+            }
             Write-Status $instanceName $toolName 'Done' $confirmed
         } catch {
             Write-Status $instanceName $toolName 'FAILED' $_.Exception.Message
@@ -335,7 +368,9 @@ foreach ($server in $MiServers)  { Install-ToolsOnServer -Server $server -DbName
 # Cleanup temp directories
 foreach ($dir in @($frkDir, $ddDir)) {
     $parent = Split-Path $dir -Parent
-    if (Test-Path $parent) { Remove-Item $parent -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $parent) {
+        Remove-Item $parent -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Done."
